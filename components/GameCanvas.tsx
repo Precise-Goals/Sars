@@ -18,6 +18,7 @@ interface PlayerState {
   isSprinting: boolean;
   isCrouching: boolean;
   isSliding: boolean;
+  team?: "red" | "blue";
 }
 
 type ShotTrace = [number, number, number, number]; // [ox, oz, dx, dz]
@@ -25,6 +26,8 @@ type ShotTrace = [number, number, number, number]; // [ox, oz, dx, dz]
 interface ServerFrame {
   players: PlayerState[];
   shots: ShotTrace[];
+  gameMode?: "ffa" | "tdm";
+  teamScores?: { red: number; blue: number };
 }
 
 interface InputState {
@@ -94,20 +97,15 @@ const FirstPersonGun = ({ isSprinting, isCrouching, isShooting }: {
   isCrouching: boolean;
   isShooting: boolean;
 }) => {
-  const { camera } = useThree();
   const groupRef   = useRef<THREE.Group>(null!);
   const time       = useRef(0);
   const flash      = useRef(0);
   const [showFlash, setShowFlash] = useState(false);
 
-  // Attach group as child of camera so it moves with it in world space
-  useEffect(() => {
-    const g = groupRef.current;
-    if (g) { camera.add(g); }
-    return () => { if (g) camera.remove(g); };
-  }, [camera]);
+  const localPos = useRef(new THREE.Vector3(0.27, -0.30, -0.48));
+  const localRotX = useRef(0);
 
-  useFrame((_, delta) => {
+  useFrame((state, delta) => {
     time.current += delta;
     if (isShooting && flash.current <= 0) {
       flash.current = 0.1;
@@ -130,15 +128,21 @@ const FirstPersonGun = ({ isSprinting, isCrouching, isShooting }: {
     const tgtX = isSprinting ? 0.20 : 0.27;
     const recoilZ = flash.current > 0 ? 0.04 : 0;
 
-    g.position.x = THREE.MathUtils.lerp(g.position.x, tgtX + bobX, 0.18);
-    g.position.y = THREE.MathUtils.lerp(g.position.y, tgtY + bobY, 0.18);
-    g.position.z = THREE.MathUtils.lerp(g.position.z, -0.48 + recoilZ, 0.22);
-    g.rotation.x = THREE.MathUtils.lerp(g.rotation.x, flash.current > 0 ? -0.07 : 0, 0.22);
+    localPos.current.x = THREE.MathUtils.lerp(localPos.current.x, tgtX + bobX, 0.18);
+    localPos.current.y = THREE.MathUtils.lerp(localPos.current.y, tgtY + bobY, 0.18);
+    localPos.current.z = THREE.MathUtils.lerp(localPos.current.z, -0.48 + recoilZ, 0.22);
+    localRotX.current = THREE.MathUtils.lerp(localRotX.current, flash.current > 0 ? -0.07 : 0, 0.22);
+
+    const offset = localPos.current.clone();
+    offset.applyQuaternion(state.camera.quaternion);
+
+    g.position.copy(state.camera.position).add(offset);
+    g.rotation.copy(state.camera.rotation);
+    g.rotateX(localRotX.current);
   });
 
-  // Rendered as a detached group — actually lives in camera space via camera.add()
   return (
-    <group ref={groupRef} position={[0.27, -0.30, -0.48]}>
+    <group ref={groupRef}>
       {/* Barrel */}
       <mesh position={[0, 0.024, -0.17]}>
         <boxGeometry args={[0.054, 0.054, 0.36]} />
@@ -172,7 +176,7 @@ const FirstPersonGun = ({ isSprinting, isCrouching, isShooting }: {
 
 // ─── Enemy player model ───────────────────────────────────────────────────────
 
-const EnemyPlayer = ({ player }: { player: PlayerState }) => {
+const EnemyPlayer = ({ player, gameMode }: { player: PlayerState; gameMode: "ffa" | "tdm" }) => {
   const groupRef = useRef<THREE.Group>(null!);
   const targetPos = useRef(new THREE.Vector3(player.position.x, player.position.y, player.position.z));
   const targetRotY = useRef(player.rotY);
@@ -187,9 +191,18 @@ const EnemyPlayer = ({ player }: { player: PlayerState }) => {
   });
 
   const crouchScale = player.isCrouching || player.isSliding ? 0.65 : 1;
-  const bodyColor = player.isBot
+  
+  let bodyColor = player.isBot
     ? (player.health <= 40 ? "#f97316" : "#818cf8")
     : (player.health <= 40 ? "#ef4444" : "#3b82f6");
+
+  if (gameMode === "tdm") {
+    if (player.team === "red") {
+      bodyColor = player.health <= 40 ? "#f97316" : "#ef4444";
+    } else if (player.team === "blue") {
+      bodyColor = player.health <= 40 ? "#60a5fa" : "#3b82f6";
+    }
+  }
 
   const shortLabel = player.id.slice(0, 11);
 
@@ -239,7 +252,7 @@ const EnemyPlayer = ({ player }: { player: PlayerState }) => {
         {/* Label */}
         <Text fontSize={0.22} color="white" anchorX="center" anchorY="middle"
               outlineWidth={0.04} outlineColor="#000" position={[0, 0, 0.002]}>
-          {`${player.isBot ? "🤖" : "🎮"} ${shortLabel}  ♥${player.health}`}
+          {`${player.isBot ? "🤖" : "🎮"} ${gameMode === "tdm" ? (player.team === "red" ? "[RED] " : "[BLUE] ") : ""}${shortLabel}  ♥${player.health}`}
         </Text>
       </Billboard>
     </group>
@@ -290,12 +303,13 @@ const CameraRig = ({ myPlayer, locked }: {
 export type WsStatus = "connecting" | "connected" | "error" | "reconnecting";
 
 const NetworkController = ({
-  setFrame, setLocalId, setLocked, setWsStatus,
+  setFrame, setLocalId, setLocked, setWsStatus, setWs,
 }: {
   setFrame: React.Dispatch<React.SetStateAction<ServerFrame>>;
   setLocalId: React.Dispatch<React.SetStateAction<string | null>>;
   setLocked: React.Dispatch<React.SetStateAction<boolean>>;
   setWsStatus: React.Dispatch<React.SetStateAction<WsStatus>>;
+  setWs: React.Dispatch<React.SetStateAction<WebSocket | null>>;
 }) => {
   const wsRef      = useRef<WebSocket | null>(null);
   const localIdRef = useRef<string | null>(null);
@@ -322,6 +336,7 @@ const NetworkController = ({
       const ws = new WebSocket("ws://localhost:8080");
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
+      setWs(ws);
 
       ws.onopen = () => {
         if (destroyed.current) { ws.close(); return; }
@@ -365,8 +380,9 @@ const NetworkController = ({
       destroyed.current = true;
       if (retryTimer.current) clearTimeout(retryTimer.current);
       wsRef.current?.close();
+      setWs(null);
     };
-  }, [setFrame, setLocalId, setWsStatus]);
+  }, [setFrame, setLocalId, setWsStatus, setWs]);
 
   // Keys
   useEffect(() => {
@@ -475,10 +491,20 @@ export default function GameCanvas() {
   const [localId,   setLocalId]   = useState<string | null>(null);
   const [locked,    setLocked]    = useState(false);
   const [wsStatus,  setWsStatus]  = useState<WsStatus>("connecting");
+  const [ws,        setWs]        = useState<WebSocket | null>(null);
 
   const myPlayer   = frame.players.find(p => p.id === localId);
   const botCount   = frame.players.filter(p => p.isBot).length;
   const humanCount = frame.players.filter(p => !p.isBot).length;
+
+  const gameMode = frame.gameMode ?? "ffa";
+  const teamScores = frame.teamScores ?? { red: 0, blue: 0 };
+
+  const changeMode = (mode: "ffa" | "tdm") => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(pack({ type: "CHANGE_MODE", mode }));
+    }
+  };
 
   // Stance label
   const stance = myPlayer?.isSliding ? "SLIDE" : myPlayer?.isCrouching ? "CROUCH"
@@ -530,6 +556,11 @@ export default function GameCanvas() {
             </div>
             <div className="mt-1 text-[10px] text-blue-400 font-bold tracking-[0.2em]">SCORE</div>
             <div className="text-white text-3xl font-black leading-none">{myPlayer?.score ?? 0}</div>
+            {gameMode === "tdm" && myPlayer?.team && (
+              <div className="mt-2 text-[10px] font-bold tracking-[0.2em] uppercase" style={{ color: myPlayer.team === "red" ? "#f87171" : "#60a5fa" }}>
+                TEAM {myPlayer.team}
+              </div>
+            )}
           </div>
 
           {/* Stance indicator — bottom centre */}
@@ -561,25 +592,45 @@ export default function GameCanvas() {
             </svg>
           </div>
 
+          {/* Team Score Overlay — top center */}
+          {gameMode === "tdm" && (
+            <div className="absolute top-6 left-1/2 -translate-x-1/2 flex gap-6 px-6 py-2.5 bg-black/60 border border-white/10 rounded-2xl backdrop-blur-md">
+              <div className="flex flex-col items-center">
+                <span className="text-[9px] text-red-400 font-bold tracking-[0.2em]">RED TEAM</span>
+                <span className="text-white text-xl font-black">{teamScores.red}</span>
+              </div>
+              <div className="w-[1px] bg-white/10 self-stretch" />
+              <div className="flex flex-col items-center">
+                <span className="text-[9px] text-blue-400 font-bold tracking-[0.2em]">BLUE TEAM</span>
+                <span className="text-white text-xl font-black">{teamScores.blue}</span>
+              </div>
+            </div>
+          )}
+
           {/* Scoreboard — top right */}
           <div className="absolute top-16 right-4 flex flex-col gap-1 w-48">
             <div className="text-[9px] text-zinc-500 font-bold tracking-[0.2em] mb-0.5 text-right">
               {humanCount} HUMAN · {botCount} BOT
             </div>
-            {[...frame.players].sort((a,b) => b.score - a.score).map(p => (
-              <div key={p.id}
-                className={`flex items-center justify-between px-2 py-1 rounded text-[10px] font-mono border ${
-                  p.id === localId
+            {[...frame.players].sort((a,b) => b.score - a.score).map(p => {
+              const isSelf = p.id === localId;
+              const rowClass = gameMode === "tdm"
+                ? (p.team === "red"
+                    ? `bg-red-950/40 ${isSelf ? "border-red-500 text-white font-black" : "border-red-900/40 text-red-200"}`
+                    : `bg-blue-950/40 ${isSelf ? "border-blue-500 text-white font-black" : "border-blue-900/40 text-blue-200"}`)
+                : (isSelf
                     ? "bg-blue-600/40 border-blue-500/40 text-white"
-                    : "bg-black/40 border-white/5 text-zinc-400"
-                }`}
-              >
-                <span className={p.isBot ? "text-purple-300" : "text-green-300"}>
-                  {p.isBot ? "🤖" : "🎮"} {p.id.slice(0, 9)}
-                </span>
-                <span>{p.score}</span>
-              </div>
-            ))}
+                    : "bg-black/40 border-white/5 text-zinc-400");
+              const namePrefix = gameMode === "tdm" ? (p.team === "red" ? "[R] " : "[B] ") : "";
+              return (
+                <div key={p.id} className={`flex items-center justify-between px-2 py-1 rounded text-[10px] font-mono border ${rowClass}`}>
+                  <span className={p.isBot ? "text-purple-300" : "text-green-300"}>
+                    {p.isBot ? "🤖" : "🎮"} {namePrefix}{p.id.slice(0, 9)}
+                  </span>
+                  <span>{p.score}</span>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -589,7 +640,40 @@ export default function GameCanvas() {
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-gradient-to-b from-black/85 to-black/65 backdrop-blur-sm pointer-events-none select-none">
           <div className="text-center">
             <div className="text-white text-6xl font-black tracking-[0.5em] mb-1 drop-shadow-2xl">SARS</div>
-            <div className="text-zinc-500 text-xs font-bold tracking-[0.4em] mb-10">MULTIPLAYER FPS</div>
+            <div className="text-zinc-500 text-xs font-bold tracking-[0.4em] mb-4">MULTIPLAYER FPS</div>
+            
+            {/* Game Mode Selector */}
+            <div className="mb-8 flex gap-3 justify-center pointer-events-auto">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  changeMode("ffa");
+                }}
+                className={`px-4 py-2 rounded-xl text-[10px] font-black tracking-wider transition-all duration-200 border cursor-pointer ${
+                  gameMode === "ffa"
+                    ? "bg-blue-600 text-white border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.3)]"
+                    : "bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:bg-zinc-800"
+                }`}
+              >
+                FREE FOR ALL (8 Players)
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  changeMode("tdm");
+                }}
+                className={`px-4 py-2 rounded-xl text-[10px] font-black tracking-wider transition-all duration-200 border cursor-pointer ${
+                  gameMode === "tdm"
+                    ? "bg-blue-600 text-white border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.3)]"
+                    : "bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:bg-zinc-800"
+                }`}
+              >
+                TEAM DEATHMATCH (4 VS 4)
+              </button>
+            </div>
+
             <div className="inline-flex items-center gap-2 px-8 py-3.5 bg-blue-600/90 rounded-full border border-blue-400/40 text-white font-black text-sm tracking-widest animate-pulse shadow-[0_0_40px_rgba(59,130,246,0.4)]">
               CLICK TO PLAY
             </div>
@@ -624,13 +708,13 @@ export default function GameCanvas() {
 
         <ArenaGeometry />
         <TracesLayer shots={frame.shots} />
-        <NetworkController setFrame={setFrame} setLocalId={setLocalId} setLocked={setLocked} setWsStatus={setWsStatus} />
+        <NetworkController setFrame={setFrame} setLocalId={setLocalId} setLocked={setLocked} setWsStatus={setWsStatus} setWs={setWs} />
         <CameraRig myPlayer={myPlayer} locked={locked} />
 
         {/* Enemies — every player except local */}
         {frame.players
           .filter(p => p.id !== localId)
-          .map(p => <EnemyPlayer key={p.id} player={p} />)
+          .map(p => <EnemyPlayer key={p.id} player={p} gameMode={gameMode} />)
         }
       </Canvas>
     </div>

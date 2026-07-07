@@ -6,6 +6,9 @@ import type { InputData } from "./server/game-state";
 // ─── Match state ─────────────────────────────────────────────────────────────
 
 const matchManager = new SarsMatchManager();
+matchManager.onShot = (ox, oz, dx, dz) => {
+  pendingShots.push([ox, oz, dx, dz]);
+};
 
 // Pending bullet-trace events for the next broadcast: [originX, originZ, dirX, dirZ]
 const pendingShots: [number, number, number, number][] = [];
@@ -48,14 +51,21 @@ const server = Bun.serve<WsData>({
       }
 
       try {
-        const input = unpack(buf) as InputData;
+        const msg = unpack(buf);
+        if (msg && msg.type === "CHANGE_MODE") {
+          matchManager.setGameMode(msg.mode);
+          return;
+        }
+
+        const input = msg as InputData;
 
         // Record shot origin before processing so we can broadcast the trace
         if (input.shoot) {
           const shooter = matchManager.players.get(ws.data.id);
           if (shooter) {
-            const dirX = Math.sin(shooter.rotY);
-            const dirZ = Math.cos(shooter.rotY);
+            // Correct shooting direction to look forward (negative Z when rotY = 0)
+            const dirX = -Math.sin(shooter.rotY);
+            const dirZ = -Math.cos(shooter.rotY);
             pendingShots.push([
               shooter.position.x,
               shooter.position.z,
@@ -92,7 +102,12 @@ setInterval(() => {
   const state = Array.from(matchManager.players.values());
   const shots = pendingShots.splice(0); // drain and reset
 
-  server.publish("sars-match", pack({ players: state, shots }));
+  server.publish("sars-match", pack({
+    players: state,
+    shots,
+    gameMode: matchManager.gameMode,
+    teamScores: matchManager.teamScores
+  }));
 }, 1000 / 30);
 
 console.log(`[Sars] Server running on ws://localhost:${server.port}`);

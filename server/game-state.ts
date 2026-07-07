@@ -14,6 +14,7 @@ export interface Player {
   isSprinting: boolean;
   isCrouching: boolean;
   isSliding: boolean;
+  team?: "red" | "blue";
 }
 
 export interface InputData {
@@ -47,17 +48,22 @@ const BOT_SHOOT_CHANCE = 0.03;
 
 export class SarsMatchManager {
   public players: Map<string, Player> = new Map();
+  public gameMode: "ffa" | "tdm" = "ffa";
+  public teamScores = { red: 0, blue: 0 };
+  public onShot?: (ox: number, oz: number, dx: number, dz: number) => void;
 
   // ── Player lifecycle ──────────────────────────────────────────────────────
 
   public addPlayer(id: string): void {
     this.players.set(id, this.makePlayer(id, false));
     this.rebalanceBots();
+    this.balanceTeams();
   }
 
   public removePlayer(id: string): void {
     this.players.delete(id);
     this.rebalanceBots();
+    this.balanceTeams();
   }
 
   // ── Bot management ────────────────────────────────────────────────────────
@@ -98,6 +104,38 @@ export class SarsMatchManager {
     };
   }
 
+  public setGameMode(mode: "ffa" | "tdm"): void {
+    if (this.gameMode === mode) return;
+    this.gameMode = mode;
+    this.teamScores = { red: 0, blue: 0 };
+    for (const p of this.players.values()) {
+      p.score = 0;
+      p.health = 100;
+      p.position = this.randomSpawn();
+    }
+    this.balanceTeams();
+  }
+
+  public balanceTeams(): void {
+    if (this.gameMode === "ffa") {
+      for (const p of this.players.values()) {
+        p.team = undefined;
+      }
+      return;
+    }
+
+    // In TDM, split 4 vs 4
+    const all = [...this.players.values()].sort((a, b) => {
+      // humans first
+      if (a.isBot !== b.isBot) return a.isBot ? 1 : -1;
+      return a.id.localeCompare(b.id);
+    });
+
+    for (let i = 0; i < all.length; i++) {
+      all[i].team = (i % 2 === 0) ? "red" : "blue";
+    }
+  }
+
   private humanCount() { return [...this.players.values()].filter(p => !p.isBot).length; }
   private botCount()   { return [...this.players.values()].filter(p =>  p.isBot).length; }
 
@@ -116,6 +154,7 @@ export class SarsMatchManager {
     let target: Player | null = null;
     for (const p of all) {
       if (p.id === bot.id) continue;
+      if (this.gameMode === "tdm" && p.team === bot.team) continue;
       const dx = p.position.x - bot.position.x;
       const dz = p.position.z - bot.position.z;
       const d  = Math.hypot(dx, dz);
@@ -125,7 +164,8 @@ export class SarsMatchManager {
     if (target) {
       const dx      = target.position.x - bot.position.x;
       const dz      = target.position.z - bot.position.z;
-      bot.rotY      = lerpAngle(bot.rotY, Math.atan2(dx, dz), 0.06);
+      // Face target (negative Z is forward, so angle must be Math.atan2(-dx, -dz))
+      bot.rotY      = lerpAngle(bot.rotY, Math.atan2(-dx, -dz), 0.06);
     } else {
       bot.rotY += (Math.random() - 0.5) * 0.12;
     }
@@ -133,9 +173,10 @@ export class SarsMatchManager {
     // Walk toward target unless already very close
     if (!target || nearestDist > 4) {
       const cand: Vector3 = {
-        x: bot.position.x + Math.sin(bot.rotY) * BOT_BASE_SPEED,
+        // Move in forward direction (-sin, -cos)
+        x: bot.position.x - Math.sin(bot.rotY) * BOT_BASE_SPEED,
         y: bot.position.y,
-        z: bot.position.z + Math.cos(bot.rotY) * BOT_BASE_SPEED,
+        z: bot.position.z - Math.cos(bot.rotY) * BOT_BASE_SPEED,
       };
       // simple arena clamp so bots don't leave bounds
       cand.x = Math.max(-29, Math.min(29, cand.x));
@@ -149,6 +190,11 @@ export class SarsMatchManager {
 
     // Shoot
     if (target && Math.random() < BOT_SHOOT_CHANCE) {
+      if (this.onShot) {
+        const dirX = -Math.sin(bot.rotY);
+        const dirZ = -Math.cos(bot.rotY);
+        this.onShot(bot.position.x, bot.position.z, dirX, dirZ);
+      }
       this.applyHitscan(bot, target);
     }
   }
@@ -174,8 +220,8 @@ export class SarsMatchManager {
     const targetY = player.isCrouching || player.isSliding ? 0 : 0;
     player.position.y = targetY; // Y movement reserved for future jump physics
 
-    const fwdX = Math.sin(player.rotY);
-    const fwdZ = Math.cos(player.rotY);
+    const fwdX = -Math.sin(player.rotY);
+    const fwdZ = -Math.cos(player.rotY);
     const rgtX = Math.cos(player.rotY);
     const rgtZ = -Math.sin(player.rotY);
 
@@ -211,12 +257,17 @@ export class SarsMatchManager {
   // ── Shared hit logic ──────────────────────────────────────────────────────
 
   private applyHitscan(shooter: Player, target: Player): void {
+    if (this.gameMode === "tdm" && shooter.team === target.team) return;
+
     if (!SarsPhysicsEngine.checkHitscan(shooter.position, shooter.rotY, target.position)) return;
     target.health -= 20;
     if (target.health <= 0) {
       target.health   = 100;
       target.position = this.randomSpawn();
       shooter.score  += 1;
+      if (this.gameMode === "tdm" && shooter.team) {
+        this.teamScores[shooter.team] += 1;
+      }
     }
   }
 

@@ -44,8 +44,8 @@ export class SarsPhysicsEngine {
         }
 
         // Direction vector of the ray on the XZ plane
-        const dirX = Math.sin(rotY);
-        const dirZ = Math.cos(rotY);
+        const dirX = -Math.sin(rotY);
+        const dirZ = -Math.cos(rotY);
 
         // Vector from origin to target center
         const dx = target.x - origin.x;
