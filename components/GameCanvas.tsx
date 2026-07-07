@@ -19,6 +19,8 @@ interface PlayerState {
   isCrouching: boolean;
   isSliding: boolean;
   team?: "red" | "blue";
+  ammo: number;
+  reloadTicks: number;
 }
 
 type ShotTrace = [number, number, number, number]; // [ox, oz, dx, dz]
@@ -38,6 +40,7 @@ interface InputState {
   crouch: boolean;
   slide: boolean;
   jump: boolean;
+  reload: boolean;
 }
 
 // ─── Bullet muzzle flash + trace ─────────────────────────────────────────────
@@ -318,6 +321,7 @@ const NetworkController = ({
     w: false, a: false, s: false, d: false,
     rotY: 0, shoot: false,
     sprint: false, crouch: false, slide: false, jump: false,
+    reload: false,
   });
   const retryCount  = useRef(0);
   const retryTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -396,6 +400,7 @@ const NetworkController = ({
       if (e.code === "ShiftLeft") i.sprint = true;
       if (e.code === "KeyC")      i.crouch = true;
       if (e.code === "KeyX")      i.slide = true;
+      if (e.code === "KeyR")      i.reload = true;
     };
     const up = (e: KeyboardEvent) => {
       const i = inputRef.current;
@@ -407,6 +412,7 @@ const NetworkController = ({
       if (e.code === "ShiftLeft") i.sprint = false;
       if (e.code === "KeyC")      i.crouch = false;
       if (e.code === "KeyX")      i.slide = false;
+      if (e.code === "KeyR")      i.reload = false;
     };
     const md = () => { inputRef.current.shoot = true; };
     const mu = () => { inputRef.current.shoot = false; };
@@ -445,10 +451,10 @@ const ArenaGeometry = () => (
     {/* Ground */}
     <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
       <planeGeometry args={[300, 300]} />
-      <meshStandardMaterial color="#0b1120" roughness={0.95} />
+      <meshStandardMaterial color="#3f3f46" roughness={0.95} />
     </mesh>
     {/* Grid */}
-    <gridHelper args={[120, 60, "#1e3a5f", "#0c1a2e"]} position={[0, 0.015, 0]} />
+    <gridHelper args={[120, 60, "#4b5563", "#27272a"]} position={[0, 0.015, 0]} />
 
     {/* Perimeter walls */}
     {([
@@ -470,7 +476,7 @@ const ArenaGeometry = () => (
     ] as [number,number][]).map(([x, z], i) => (
       <mesh key={i} position={[x, 1, z]} castShadow receiveShadow>
         <boxGeometry args={[2.5, 2, 2.5]} />
-        <meshStandardMaterial color="#1e3a5f" roughness={0.7} metalness={0.2} />
+        <meshStandardMaterial color="#ea580c" roughness={0.7} metalness={0.2} />
       </mesh>
     ))}
 
@@ -478,7 +484,7 @@ const ArenaGeometry = () => (
     {([ [0, 8], [-8, 0], [8, 0] ] as [number,number][]).map(([x, z], i) => (
       <mesh key={`pillar-${i}`} position={[x, 2, z]} castShadow receiveShadow>
         <boxGeometry args={[1.2, 4, 1.2]} />
-        <meshStandardMaterial color="#334155" roughness={0.6} metalness={0.3} />
+        <meshStandardMaterial color="#9a3412" roughness={0.6} metalness={0.3} />
       </mesh>
     ))}
   </>
@@ -572,8 +578,21 @@ export default function GameCanvas() {
             </div>
           )}
 
+          {/* Ammo display — bottom right */}
+          <div className="absolute bottom-28 right-6 flex flex-col items-end gap-0.5 pointer-events-none select-none">
+            <span className="text-[10px] text-zinc-500 font-bold tracking-[0.2em]">AMMO</span>
+            {myPlayer && myPlayer.reloadTicks > 0 ? (
+              <span className="text-yellow-500 text-2xl font-black tracking-widest animate-pulse font-mono">RELOADING</span>
+            ) : (
+              <span className="text-white text-4xl font-black font-mono">
+                {myPlayer?.ammo ?? 30}<span className="text-zinc-500 text-xl font-normal"> / 30</span>
+              </span>
+            )}
+          </div>
+
           {/* Ammo / controls hint — bottom right */}
           <div className="absolute bottom-8 right-6 flex flex-col items-end gap-1 text-[10px] text-zinc-600 font-mono">
+            <span>R — Reload</span>
             <span>SHIFT — Sprint</span>
             <span>C — Crouch</span>
             <span>X — Slide</span>
@@ -679,6 +698,7 @@ export default function GameCanvas() {
             </div>
             <div className="mt-8 grid grid-cols-2 gap-x-8 gap-y-1.5 text-zinc-600 text-xs text-left mx-auto w-fit">
               <span>WASD</span><span className="text-zinc-500">Move</span>
+              <span>R</span><span className="text-zinc-500">Reload weapon</span>
               <span>SHIFT</span><span className="text-zinc-500">Sprint</span>
               <span>C</span><span className="text-zinc-500">Crouch</span>
               <span>X</span><span className="text-zinc-500">Slide</span>

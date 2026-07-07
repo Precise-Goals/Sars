@@ -15,6 +15,8 @@ export interface Player {
   isCrouching: boolean;
   isSliding: boolean;
   team?: "red" | "blue";
+  ammo: number;
+  reloadTicks: number;
 }
 
 export interface InputData {
@@ -28,6 +30,7 @@ export interface InputData {
   crouch: boolean;   // C
   slide: boolean;    // X
   jump: boolean;     // Space
+  reload?: boolean;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -101,6 +104,8 @@ export class SarsMatchManager {
       isSprinting: false,
       isCrouching: false,
       isSliding:   false,
+      ammo: 30,
+      reloadTicks: 0,
     };
   }
 
@@ -133,6 +138,17 @@ export class SarsMatchManager {
 
     for (let i = 0; i < all.length; i++) {
       all[i].team = (i % 2 === 0) ? "red" : "blue";
+    }
+  }
+
+  public tickReloads(): void {
+    for (const player of this.players.values()) {
+      if (player.reloadTicks > 0) {
+        player.reloadTicks -= 1;
+        if (player.reloadTicks === 0) {
+          player.ammo = 30;
+        }
+      }
     }
   }
 
@@ -190,12 +206,22 @@ export class SarsMatchManager {
 
     // Shoot
     if (target && Math.random() < BOT_SHOOT_CHANCE) {
-      if (this.onShot) {
-        const dirX = -Math.sin(bot.rotY);
-        const dirZ = -Math.cos(bot.rotY);
-        this.onShot(bot.position.x, bot.position.z, dirX, dirZ);
+      if (bot.reloadTicks === 0) {
+        if (bot.ammo > 0) {
+          bot.ammo -= 1;
+          if (this.onShot) {
+            const dirX = -Math.sin(bot.rotY);
+            const dirZ = -Math.cos(bot.rotY);
+            this.onShot(bot.position.x, bot.position.z, dirX, dirZ);
+          }
+          this.applyHitscan(bot, target);
+          if (bot.ammo === 0) {
+            bot.reloadTicks = 45; // Auto-reload bot
+          }
+        } else {
+          bot.reloadTicks = 45; // Auto-reload bot
+        }
       }
-      this.applyHitscan(bot, target);
     }
   }
 
@@ -245,11 +271,26 @@ export class SarsMatchManager {
     );
     if (!blocked) { player.position.x = cand.x; player.position.z = cand.z; }
 
+    // Reload input check
+    if (input.reload && player.reloadTicks === 0 && player.ammo < 30) {
+      player.reloadTicks = 45;
+    }
+
     // Shoot — once per click (server prevents auto-fire spam by checking shoot boolean)
     if (input.shoot) {
-      for (const [id, target] of this.players) {
-        if (id === playerId) continue;
-        this.applyHitscan(player, target);
+      if (player.reloadTicks === 0) {
+        if (player.ammo > 0) {
+          player.ammo -= 1;
+          for (const [id, target] of this.players) {
+            if (id === playerId) continue;
+            this.applyHitscan(player, target);
+          }
+          if (player.ammo === 0) {
+            player.reloadTicks = 45; // Auto-reload when magazine is empty
+          }
+        } else {
+          player.reloadTicks = 45; // Auto-reload if trying to shoot with empty mag
+        }
       }
     }
   }

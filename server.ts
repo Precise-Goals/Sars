@@ -92,6 +92,9 @@ const server = Bun.serve<WsData>({
 // ─── 30 Hz game loop ─────────────────────────────────────────────────────────
 
 setInterval(() => {
+  // Tick reload timers
+  matchManager.tickReloads();
+
   // Tick bot AI
   matchManager.tickBots();
 
