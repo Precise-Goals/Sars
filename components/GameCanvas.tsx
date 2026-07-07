@@ -21,6 +21,7 @@ interface PlayerState {
   team?: "red" | "blue";
   ammo: number;
   reloadTicks: number;
+  difficulty?: "easy" | "veteran" | "hardened" | "realtime";
 }
 
 type ShotTrace = [number, number, number, number]; // [ox, oz, dx, dz]
@@ -129,12 +130,12 @@ const FirstPersonGun = ({ isSprinting, isCrouching, isShooting }: {
 
     const tgtY = isCrouching ? -0.38 : isSprinting ? -0.25 : -0.30;
     const tgtX = isSprinting ? 0.20 : 0.27;
-    const recoilZ = flash.current > 0 ? 0.04 : 0;
+    const recoilZ = flash.current > 0 ? 0.09 : 0;
 
     localPos.current.x = THREE.MathUtils.lerp(localPos.current.x, tgtX + bobX, 0.18);
     localPos.current.y = THREE.MathUtils.lerp(localPos.current.y, tgtY + bobY, 0.18);
     localPos.current.z = THREE.MathUtils.lerp(localPos.current.z, -0.48 + recoilZ, 0.22);
-    localRotX.current = THREE.MathUtils.lerp(localRotX.current, flash.current > 0 ? -0.07 : 0, 0.22);
+    localRotX.current = THREE.MathUtils.lerp(localRotX.current, flash.current > 0 ? -0.15 : 0, 0.22);
 
     const offset = localPos.current.clone();
     offset.applyQuaternion(state.camera.quaternion);
@@ -146,6 +147,18 @@ const FirstPersonGun = ({ isSprinting, isCrouching, isShooting }: {
 
   return (
     <group ref={groupRef}>
+      {/* ── Tactical Hands / Arms ── */}
+      {/* Left arm/hand holding barrel */}
+      <mesh position={[-0.12, -0.15, -0.1]} rotation={[0.4, 0.2, -0.3]}>
+        <capsuleGeometry args={[0.038, 0.28, 6, 12]} />
+        <meshStandardMaterial color="#1f2937" roughness={0.85} metalness={0.1} />
+      </mesh>
+      {/* Right arm/hand holding grip */}
+      <mesh position={[0.07, -0.18, 0.08]} rotation={[-0.4, -0.15, 0.25]}>
+        <capsuleGeometry args={[0.042, 0.28, 6, 12]} />
+        <meshStandardMaterial color="#1f2937" roughness={0.85} metalness={0.1} />
+      </mesh>
+
       {/* Barrel */}
       <mesh position={[0, 0.024, -0.17]}>
         <boxGeometry args={[0.054, 0.054, 0.36]} />
@@ -179,7 +192,7 @@ const FirstPersonGun = ({ isSprinting, isCrouching, isShooting }: {
 
 // ─── Enemy player model ───────────────────────────────────────────────────────
 
-const EnemyPlayer = ({ player, gameMode }: { player: PlayerState; gameMode: "ffa" | "tdm" }) => {
+const EnemyPlayer = ({ player, gameMode, myTeam }: { player: PlayerState; gameMode: "ffa" | "tdm"; myTeam?: "red" | "blue" }) => {
   const groupRef = useRef<THREE.Group>(null!);
   const targetPos = useRef(new THREE.Vector3(player.position.x, player.position.y, player.position.z));
   const targetRotY = useRef(player.rotY);
@@ -194,23 +207,32 @@ const EnemyPlayer = ({ player, gameMode }: { player: PlayerState; gameMode: "ffa
   });
 
   const crouchScale = player.isCrouching || player.isSliding ? 0.65 : 1;
+  const isEnemy = gameMode === "ffa" || (player.team !== myTeam);
   
-  let bodyColor = player.isBot
-    ? (player.health <= 40 ? "#f97316" : "#818cf8")
-    : (player.health <= 40 ? "#ef4444" : "#3b82f6");
-
+  let bodyColor = "#3b82f6";
   if (gameMode === "tdm") {
-    if (player.team === "red") {
-      bodyColor = player.health <= 40 ? "#f97316" : "#ef4444";
-    } else if (player.team === "blue") {
-      bodyColor = player.health <= 40 ? "#60a5fa" : "#3b82f6";
+    if (player.team === myTeam) {
+      bodyColor = "#3b82f6";
+    } else {
+      bodyColor = "#ef4444";
     }
+  } else {
+    bodyColor = "#3b82f6";
   }
 
+  const showRedGlow = isEnemy;
   const shortLabel = player.id.slice(0, 11);
 
   return (
     <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
+      {/* Glow border shell */}
+      {showRedGlow && (
+        <mesh position={[0, crouchScale, 0]} scale={[1.08, crouchScale, 1.08]}>
+          <cylinderGeometry args={[0.5, 0.5, 2, 16]} />
+          <meshBasicMaterial color="#ef4444" wireframe transparent opacity={0.25} />
+        </mesh>
+      )}
+
       {/* ── Body cylinder */}
       <mesh position={[0, crouchScale, 0]} scale={[1, crouchScale, 1]} castShadow>
         <cylinderGeometry args={[0.5, 0.5, 2, 16]} />
@@ -255,7 +277,7 @@ const EnemyPlayer = ({ player, gameMode }: { player: PlayerState; gameMode: "ffa
         {/* Label */}
         <Text fontSize={0.22} color="white" anchorX="center" anchorY="middle"
               outlineWidth={0.04} outlineColor="#000" position={[0, 0, 0.002]}>
-          {`${player.isBot ? "🤖" : "🎮"} ${gameMode === "tdm" ? (player.team === "red" ? "[RED] " : "[BLUE] ") : ""}${shortLabel}  ♥${player.health}`}
+          {`${player.isBot ? `🤖 [${(player.difficulty ?? "easy").toUpperCase()}]` : "🎮"} ${gameMode === "tdm" ? (player.team === "red" ? "[RED] " : "[BLUE] ") : ""}${shortLabel}  ♥${player.health}`}
         </Text>
       </Billboard>
     </group>
@@ -306,13 +328,14 @@ const CameraRig = ({ myPlayer, locked }: {
 export type WsStatus = "connecting" | "connected" | "error" | "reconnecting";
 
 const NetworkController = ({
-  setFrame, setLocalId, setLocked, setWsStatus, setWs,
+  setFrame, setLocalId, setLocked, setWsStatus, setWs, sensitivity,
 }: {
   setFrame: React.Dispatch<React.SetStateAction<ServerFrame>>;
   setLocalId: React.Dispatch<React.SetStateAction<string | null>>;
   setLocked: React.Dispatch<React.SetStateAction<boolean>>;
   setWsStatus: React.Dispatch<React.SetStateAction<WsStatus>>;
   setWs: React.Dispatch<React.SetStateAction<WebSocket | null>>;
+  sensitivity: number;
 }) => {
   const wsRef      = useRef<WebSocket | null>(null);
   const localIdRef = useRef<string | null>(null);
@@ -337,7 +360,8 @@ const NetworkController = ({
       if (destroyed.current) return;
       setWsStatus("connecting");
 
-      const ws = new WebSocket("ws://localhost:8080");
+      const s = typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("session") ?? "default") : "default";
+      const ws = new WebSocket(`ws://localhost:8080?session=${s}`);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
       setWs(ws);
@@ -440,6 +464,7 @@ const NetworkController = ({
     <PointerLockControls
       onLock={() => setLocked(true)}
       onUnlock={() => setLocked(false)}
+      pointerSpeed={sensitivity}
     />
   );
 };
@@ -499,6 +524,19 @@ export default function GameCanvas() {
   const [wsStatus,  setWsStatus]  = useState<WsStatus>("connecting");
   const [ws,        setWs]        = useState<WebSocket | null>(null);
 
+  const [sensitivity, setSensitivity] = useState(1.0);
+  const [botDifficultySetting, setBotDifficultySetting] = useState<"random" | "easy" | "veteran" | "hardened" | "realtime">("random");
+  const [showSettings, setShowSettings] = useState(false);
+  const [sessionId, setSessionId] = useState("default");
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const searchParams = new URLSearchParams(window.location.search);
+      const s = searchParams.get("session") ?? "default";
+      setSessionId(s);
+    }
+  }, []);
+
   const myPlayer   = frame.players.find(p => p.id === localId);
   const botCount   = frame.players.filter(p => p.isBot).length;
   const humanCount = frame.players.filter(p => !p.isBot).length;
@@ -520,6 +558,143 @@ export default function GameCanvas() {
 
   return (
     <div className="w-full h-full relative bg-zinc-950">
+
+      {/* ── Top Navigation Bar ─────────────────────────────────────────── */}
+      <nav className="absolute top-0 left-0 w-full h-14 bg-black/70 backdrop-blur-md border-b border-zinc-800/80 z-40 flex items-center justify-between px-6 shadow-2xl pointer-events-auto">
+        <div className="flex items-center gap-3">
+          <div className="w-7 h-7 rounded bg-blue-600 flex items-center justify-center shadow-[0_0_12px_rgba(37,99,235,0.6)]">
+            <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 12l9-9 9 9M5 10v9a1 1 0 001 1h4v-5h4v5h4a1 1 0 001-1v-9" />
+            </svg>
+          </div>
+          <span className="text-zinc-100 text-base font-black tracking-[0.2em]">SARS</span>
+          <span className="text-zinc-600 text-xs font-semibold tracking-widest hidden sm:block">MULTIPLAYER</span>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="hidden sm:flex items-center gap-1 text-xs text-zinc-500 font-mono bg-zinc-900/80 border border-zinc-800 rounded px-2 py-1">
+            <span className="text-green-500 animate-pulse">●</span>
+            <span>session: {sessionId}</span>
+          </div>
+          <button
+            title="Settings"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowSettings(prev => !prev);
+            }}
+            className="text-zinc-400 hover:text-white transition-colors p-1.5 rounded-full hover:bg-zinc-800/80 active:scale-95 cursor-pointer pointer-events-auto"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+        </div>
+      </nav>
+
+      {/* ── Settings Panel Overlay ────────────────────────────────────────── */}
+      {showSettings && (
+        <div 
+          onClick={() => setShowSettings(false)}
+          className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md cursor-pointer pointer-events-auto select-none"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="w-[440px] bg-zinc-950/90 border border-zinc-800/80 p-6 rounded-2xl shadow-2xl flex flex-col gap-6 cursor-default pointer-events-auto"
+          >
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <span className="text-white font-black tracking-wider text-base">GAME SETTINGS</span>
+              <button 
+                onClick={() => setShowSettings(false)}
+                className="text-zinc-500 hover:text-white text-[10px] font-bold font-mono tracking-widest border border-zinc-800 hover:border-zinc-700 px-2.5 py-1 rounded-md cursor-pointer"
+              >
+                CLOSE
+              </button>
+            </div>
+
+            {/* Mouse Sensitivity */}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-zinc-400 font-bold tracking-wider">MOUSE SENSITIVITY</span>
+                <span className="text-blue-400 text-xs font-mono font-bold">{sensitivity.toFixed(1)}x</span>
+              </div>
+              <input 
+                type="range"
+                min="0.2"
+                max="3.0"
+                step="0.1"
+                value={sensitivity}
+                onChange={(e) => setSensitivity(parseFloat(e.target.value))}
+                className="w-full h-1 bg-zinc-900 rounded-lg appearance-none cursor-pointer accent-blue-500"
+              />
+            </div>
+
+            {/* Bot Difficulty Settings */}
+            <div className="flex flex-col gap-2.5">
+              <span className="text-[10px] text-zinc-400 font-bold tracking-wider">BOT DIFFICULTY LEVEL</span>
+              <div className="grid grid-cols-2 gap-2">
+                {(["random", "easy", "veteran", "hardened", "realtime"] as const).map((diff) => (
+                  <button
+                    key={diff}
+                    onClick={() => {
+                      setBotDifficultySetting(diff);
+                      if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(pack({ type: "SET_BOT_DIFFICULTY", difficulty: diff }));
+                      }
+                    }}
+                    className={`px-3 py-2 rounded-xl text-[9px] font-black tracking-widest border transition-all duration-200 cursor-pointer ${
+                      botDifficultySetting === diff
+                        ? "bg-blue-600 text-white border-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.3)]"
+                        : "bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:bg-zinc-900"
+                    }`}
+                  >
+                    {diff.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Keybinds or controls options */}
+            <div className="flex flex-col gap-2">
+              <span className="text-[10px] text-zinc-400 font-bold tracking-wider mb-1">KEYBOARD CONTROLS</span>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-[10px] text-zinc-500 font-mono bg-zinc-900/40 p-4 border border-zinc-800/40 rounded-xl">
+                <div className="flex justify-between border-b border-zinc-800/30 pb-0.5">
+                  <span>WASD</span>
+                  <span className="text-zinc-300 font-bold">Move</span>
+                </div>
+                <div className="flex justify-between border-b border-zinc-800/30 pb-0.5">
+                  <span>LMB</span>
+                  <span className="text-zinc-300 font-bold">Shoot</span>
+                </div>
+                <div className="flex justify-between border-b border-zinc-800/30 pb-0.5">
+                  <span>R</span>
+                  <span className="text-zinc-300 font-bold">Reload</span>
+                </div>
+                <div className="flex justify-between border-b border-zinc-800/30 pb-0.5">
+                  <span>SPACE</span>
+                  <span className="text-zinc-300 font-bold">Jump</span>
+                </div>
+                <div className="flex justify-between border-b border-zinc-800/30 pb-0.5">
+                  <span>SHIFT</span>
+                  <span className="text-zinc-300 font-bold">Sprint</span>
+                </div>
+                <div className="flex justify-between border-b border-zinc-800/30 pb-0.5">
+                  <span>C</span>
+                  <span className="text-zinc-300 font-bold">Crouch</span>
+                </div>
+                <div className="flex justify-between border-b border-zinc-800/30 pb-0.5">
+                  <span>X</span>
+                  <span className="text-zinc-300 font-bold">Slide</span>
+                </div>
+                <div className="flex justify-between border-b border-zinc-800/30 pb-0.5">
+                  <span>ESC</span>
+                  <span className="text-zinc-300 font-bold">Unlock</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Server offline banner ─────────────────────────────────────────── */}
       {isOffline && (
@@ -641,10 +816,11 @@ export default function GameCanvas() {
                     ? "bg-blue-600/40 border-blue-500/40 text-white"
                     : "bg-black/40 border-white/5 text-zinc-400");
               const namePrefix = gameMode === "tdm" ? (p.team === "red" ? "[R] " : "[B] ") : "";
+              const botTag = p.isBot ? ` [${(p.difficulty ?? "easy").toUpperCase().slice(0, 4)}]` : "";
               return (
                 <div key={p.id} className={`flex items-center justify-between px-2 py-1 rounded text-[10px] font-mono border ${rowClass}`}>
                   <span className={p.isBot ? "text-purple-300" : "text-green-300"}>
-                    {p.isBot ? "🤖" : "🎮"} {namePrefix}{p.id.slice(0, 9)}
+                    {p.isBot ? "🤖" : "🎮"} {namePrefix}{p.id.slice(0, 7)}{botTag}
                   </span>
                   <span>{p.score}</span>
                 </div>
@@ -696,15 +872,18 @@ export default function GameCanvas() {
             <div className="inline-flex items-center gap-2 px-8 py-3.5 bg-blue-600/90 rounded-full border border-blue-400/40 text-white font-black text-sm tracking-widest animate-pulse shadow-[0_0_40px_rgba(59,130,246,0.4)]">
               CLICK TO PLAY
             </div>
-            <div className="mt-8 grid grid-cols-2 gap-x-8 gap-y-1.5 text-zinc-600 text-xs text-left mx-auto w-fit">
-              <span>WASD</span><span className="text-zinc-500">Move</span>
-              <span>R</span><span className="text-zinc-500">Reload weapon</span>
-              <span>SHIFT</span><span className="text-zinc-500">Sprint</span>
-              <span>C</span><span className="text-zinc-500">Crouch</span>
-              <span>X</span><span className="text-zinc-500">Slide</span>
-              <span>SPACE</span><span className="text-zinc-500">Jump</span>
-              <span>LMB</span><span className="text-zinc-500">Shoot</span>
-              <span>ESC</span><span className="text-zinc-500">Unlock cursor</span>
+            <div className="mt-6 flex justify-center pointer-events-auto">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const newSession = Math.random().toString(36).slice(2, 8);
+                  window.location.href = `/?session=${newSession}`;
+                }}
+                className="px-6 py-2 bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700 text-xs font-black tracking-widest rounded-xl transition-all duration-200 cursor-pointer"
+              >
+                PLAY ON NEW SESSION
+              </button>
             </div>
           </div>
         </div>
@@ -712,7 +891,7 @@ export default function GameCanvas() {
 
       {/* ── Three.js Canvas ───────────────────────────────────────────────── */}
       <Canvas
-        shadows
+        shadows={{ type: THREE.PCFShadowMap }}
         camera={{ fov: 80, near: 0.05, far: 600, position: [0, 1.8, 0] }}
         style={{ position: "absolute", inset: 0 }}
       >
@@ -728,13 +907,13 @@ export default function GameCanvas() {
 
         <ArenaGeometry />
         <TracesLayer shots={frame.shots} />
-        <NetworkController setFrame={setFrame} setLocalId={setLocalId} setLocked={setLocked} setWsStatus={setWsStatus} setWs={setWs} />
+        <NetworkController setFrame={setFrame} setLocalId={setLocalId} setLocked={setLocked} setWsStatus={setWsStatus} setWs={setWs} sensitivity={sensitivity} />
         <CameraRig myPlayer={myPlayer} locked={locked} />
 
         {/* Enemies — every player except local */}
         {frame.players
           .filter(p => p.id !== localId)
-          .map(p => <EnemyPlayer key={p.id} player={p} gameMode={gameMode} />)
+          .map(p => <EnemyPlayer key={p.id} player={p} gameMode={gameMode} myTeam={myPlayer?.team} />)
         }
       </Canvas>
     </div>

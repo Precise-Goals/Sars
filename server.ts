@@ -3,20 +3,28 @@ import { pack, unpack } from "msgpackr";
 import { SarsMatchManager } from "./server/game-state";
 import type { InputData } from "./server/game-state";
 
-// ─── Match state ─────────────────────────────────────────────────────────────
+// ─── Concurrent Sessions Map ──────────────────────────────────────────────────
 
-const matchManager = new SarsMatchManager();
-matchManager.onShot = (ox, oz, dx, dz) => {
-  pendingShots.push([ox, oz, dx, dz]);
-};
+const matches = new Map<string, SarsMatchManager>();
 
-// Pending bullet-trace events for the next broadcast: [originX, originZ, dirX, dirZ]
-const pendingShots: [number, number, number, number][] = [];
+function getOrCreateMatch(sessionId: string): SarsMatchManager {
+  let match = matches.get(sessionId);
+  if (!match) {
+    match = new SarsMatchManager();
+    match.onShot = (ox, oz, dx, dz) => {
+      match!.pendingShots.push([ox, oz, dx, dz]);
+    };
+    matches.set(sessionId, match);
+    console.log(`[Sars][${sessionId}] Initialized session.`);
+  }
+  return match;
+}
 
 // ─── Per-connection data ──────────────────────────────────────────────────────
 
 interface WsData {
   id: string;
+  session: string;
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -25,8 +33,10 @@ const server = Bun.serve<WsData>({
   port: Number(process.env.PORT ?? 8080),
 
   fetch(req, server) {
+    const url = new URL(req.url);
+    const session = url.searchParams.get("session") ?? "default";
     const upgraded = server.upgrade(req, {
-      data: { id: crypto.randomUUID() },
+      data: { id: crypto.randomUUID(), session },
     });
     if (upgraded) return undefined;
     return new Response("Sars Game Server — connect via WebSocket", { status: 200 });
@@ -34,10 +44,19 @@ const server = Bun.serve<WsData>({
 
   websocket: {
     open(ws: ServerWebSocket<WsData>) {
-      ws.subscribe("sars-match");
-      matchManager.addPlayer(ws.data.id);
+      const sessionId = ws.data.session;
+      const match = getOrCreateMatch(sessionId);
+      
+      const humanCount = Array.from(match.players.values()).filter(p => !p.isBot).length;
+      if (humanCount >= 8) {
+        ws.send(pack({ type: "ERROR", reason: "Lobby is full (max 8 players)" }));
+        ws.close();
+        return;
+      }
+      ws.subscribe(`sars-match:${sessionId}`);
+      match.addPlayer(ws.data.id);
       ws.send(pack({ type: "INIT", id: ws.data.id }));
-      console.log(`[Sars] Player connected:    ${ws.data.id}`);
+      console.log(`[Sars][${sessionId}] Player connected: ${ws.data.id}`);
     },
 
     message(ws: ServerWebSocket<WsData>, message: string | ArrayBuffer | Uint8Array) {
@@ -50,23 +69,29 @@ const server = Bun.serve<WsData>({
         return; // ignore plain-text frames
       }
 
+      const sessionId = ws.data.session;
+      const match = getOrCreateMatch(sessionId);
+
       try {
         const msg = unpack(buf);
         if (msg && msg.type === "CHANGE_MODE") {
-          matchManager.setGameMode(msg.mode);
+          match.setGameMode(msg.mode);
+          return;
+        }
+        if (msg && msg.type === "SET_BOT_DIFFICULTY") {
+          match.setBotDifficulty(msg.difficulty);
           return;
         }
 
         const input = msg as InputData;
 
-        // Record shot origin before processing so we can broadcast the trace
+        // Record human shot trace
         if (input.shoot) {
-          const shooter = matchManager.players.get(ws.data.id);
-          if (shooter) {
-            // Correct shooting direction to look forward (negative Z when rotY = 0)
+          const shooter = match.players.get(ws.data.id);
+          if (shooter && shooter.reloadTicks === 0 && shooter.shootCooldownTicks === 0 && shooter.ammo > 0) {
             const dirX = -Math.sin(shooter.rotY);
             const dirZ = -Math.cos(shooter.rotY);
-            pendingShots.push([
+            match.pendingShots.push([
               shooter.position.x,
               shooter.position.z,
               dirX,
@@ -75,16 +100,26 @@ const server = Bun.serve<WsData>({
           }
         }
 
-        matchManager.processInput(ws.data.id, input);
+        match.processInput(ws.data.id, input);
       } catch (e) {
-        console.error(`[Sars] Bad message from ${ws.data.id}:`, e);
+        console.error(`[Sars][${sessionId}] Bad message from ${ws.data.id}:`, e);
       }
     },
 
     close(ws: ServerWebSocket<WsData>) {
-      matchManager.removePlayer(ws.data.id);
-      ws.unsubscribe("sars-match");
-      console.log(`[Sars] Player disconnected: ${ws.data.id}`);
+      const sessionId = ws.data.session;
+      const match = matches.get(sessionId);
+      if (match) {
+        match.removePlayer(ws.data.id);
+        // Garbage collect empty session matches to keep memory footprint low
+        const humanCount = Array.from(match.players.values()).filter(p => !p.isBot).length;
+        if (humanCount === 0) {
+          matches.delete(sessionId);
+          console.log(`[Sars][${sessionId}] Disposed empty session.`);
+        }
+      }
+      ws.unsubscribe(`sars-match:${sessionId}`);
+      console.log(`[Sars][${sessionId}] Player disconnected: ${ws.data.id}`);
     },
   },
 });
@@ -92,25 +127,22 @@ const server = Bun.serve<WsData>({
 // ─── 30 Hz game loop ─────────────────────────────────────────────────────────
 
 setInterval(() => {
-  // Tick reload timers
-  matchManager.tickReloads();
+  for (const [sessionId, match] of matches.entries()) {
+    // Tick game components for this match
+    match.tickReloads();
+    match.tickBots();
+    match.tickPhysics(); // Authoritative vertical physics
 
-  // Tick bot AI
-  matchManager.tickBots();
+    const state = Array.from(match.players.values());
+    const shots = match.pendingShots.splice(0); // drain and reset
 
-  // Collect any bot shots for traces
-  // (bot shots are generated inside tickBots, we sample post-tick from bot positions)
-
-  // Broadcast state + shot traces to all subscribers
-  const state = Array.from(matchManager.players.values());
-  const shots = pendingShots.splice(0); // drain and reset
-
-  server.publish("sars-match", pack({
-    players: state,
-    shots,
-    gameMode: matchManager.gameMode,
-    teamScores: matchManager.teamScores
-  }));
+    server.publish(`sars-match:${sessionId}`, pack({
+      players: state,
+      shots,
+      gameMode: match.gameMode,
+      teamScores: match.teamScores
+    }));
+  }
 }, 1000 / 30);
 
 console.log(`[Sars] Server running on ws://localhost:${server.port}`);
