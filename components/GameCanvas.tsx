@@ -379,7 +379,7 @@ const CameraRig = ({ myPlayer, locked }: {
 export type WsStatus = "connecting" | "connected" | "error" | "reconnecting";
 
 const NetworkController = ({
-  setFrame, setLocalId, setLocked, setWsStatus, setWs, sensitivity,
+  setFrame, setLocalId, setLocked, setCanLock, setWsStatus, setWs, setSessionId, sensitivity,
 }: {
   setFrame: React.Dispatch<React.SetStateAction<ServerFrame>>;
   setLocalId: React.Dispatch<React.SetStateAction<string | null>>;
@@ -528,6 +528,7 @@ const NetworkController = ({
         setTimeout(() => setCanLock(true), 1500); // Browser security cooldown
       }}
       pointerSpeed={sensitivity}
+      selector="#play-button"
     />
   );
 };
@@ -922,11 +923,8 @@ export default function GameCanvas() {
             {/* Giant PLAY Button */}
             <div className="mb-6 flex justify-center pointer-events-auto">
               <button
+                id="play-button"
                 type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  selectMode("real"); // The server's new auto-matchmaking will handle the rest!
-                }}
                 className={`group relative inline-flex items-center justify-center gap-3 px-16 py-6 bg-blue-600 rounded-2xl border-b-[6px] border-blue-800 text-white font-black text-3xl tracking-[0.2em] shadow-[0_0_50px_rgba(37,99,235,0.4)] transition-all duration-150 active:translate-y-1.5 active:border-b-0 cursor-pointer ${canLock ? "hover:bg-blue-500 hover:shadow-[0_0_80px_rgba(59,130,246,0.6)]" : "opacity-50"}`}
               >
                 {canLock ? "CLICK TO PLAY" : "PLEASE WAIT..."}
@@ -935,6 +933,16 @@ export default function GameCanvas() {
 
             {/* Sub options */}
             <div className="flex gap-4 justify-center pointer-events-auto">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  selectMode("real");
+                }}
+                className="px-6 py-3 bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600 hover:bg-zinc-800 text-[11px] font-black tracking-widest rounded-xl transition-all cursor-pointer"
+              >
+                REAL MATCHMAKING
+              </button>
               <button
                 type="button"
                 onClick={(e) => {
