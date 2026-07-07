@@ -171,14 +171,35 @@ export class RoomPhysics {
         }
     }
 
-    public checkHitscan(origin: Vector3, dir: Vector3, maxDistance: number): string | null {
+    public checkLineOfSight(origin: Vector3, target: Vector3): boolean {
+        const dx = target.x - origin.x;
+        const dy = target.y - origin.y;
+        const dz = target.z - origin.z;
+        const dist = Math.hypot(dx, dy, dz);
+        
+        if (dist <= 0) return true;
+
+        const ray = new RAPIER.Ray(
+            { x: origin.x, y: origin.y, z: origin.z },
+            { x: dx / dist, y: dy / dist, z: dz / dist }
+        );
+
+        // Cast ray and ONLY check against the global map collider
+        const hit = globalWorld.castRay(ray, dist, true, RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC, undefined, undefined, undefined, (c: RAPIER.Collider) => {
+            return c.handle === mapCollider.handle;
+        });
+        
+        return hit === null; // True if nothing blocked the ray
+    }
+
+    public checkHitscan(origin: Vector3, dir: Vector3, maxDistance: number): { hitId: string | null; distance: number } {
         const ray = new RAPIER.Ray(
             { x: origin.x, y: origin.y, z: origin.z },
             { x: dir.x, y: dir.y, z: dir.z }
         );
 
         let closestHitId: string | null = null;
-        let closestDist = maxDistance;
+        let distance = maxDistance;
 
         // Using standard castRay with predicate to only hit map or same-room players
         const hit = globalWorld.castRay(ray, maxDistance, true, RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC, undefined, undefined, undefined, (c: RAPIER.Collider) => {
@@ -186,13 +207,15 @@ export class RoomPhysics {
         });
         
         if (hit && hit.collider) {
+            distance = hit.timeOfImpact;
             // Did we hit a player?
             for (const [id, collider] of this.playerColliders.entries()) {
                 if (collider.handle === hit.collider.handle) {
-                    return id;
+                    closestHitId = id;
+                    break;
                 }
             }
         }
-        return null;
+        return { hitId: closestHitId, distance };
     }
 }

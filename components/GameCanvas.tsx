@@ -24,7 +24,7 @@ interface PlayerState {
   difficulty?: "easy" | "veteran" | "hardened" | "realtime";
 }
 
-type ShotTrace = [number, number, number, number]; // [ox, oz, dx, dz]
+type ShotTrace = [number, number, number, number, number, number]; // [ox, oy, oz, dx, dz, dist]
 
 interface ServerFrame {
   players: PlayerState[];
@@ -47,7 +47,7 @@ interface InputState {
 // ─── Bullet muzzle flash + trace ─────────────────────────────────────────────
 
 let traceId = 0;
-interface Trace { id: number; ox: number; oz: number; dx: number; dz: number; born: number; }
+interface Trace { id: number; ox: number; oy: number; oz: number; dx: number; dz: number; dist: number; born: number; }
 const TRACE_LEN  = 40;
 const TRACE_LIFE = 280;
 
@@ -57,11 +57,12 @@ const BulletTrace = ({ t }: { t: Trace }) => {
     const alpha = Math.max(0, 1 - (Date.now() - t.born) / TRACE_LIFE);
     if (mat.current) mat.current.opacity = alpha;
   });
-  const mx = t.ox + t.dx * TRACE_LEN / 2;
-  const mz = t.oz + t.dz * TRACE_LEN / 2;
+  const len = Math.min(t.dist, 100.0);
+  const mx = t.ox + t.dx * len / 2;
+  const mz = t.oz + t.dz * len / 2;
   return (
-    <mesh position={[mx, 1.55, mz]} rotation={[0, Math.atan2(t.dx, t.dz), 0]}>
-      <boxGeometry args={[0.025, 0.025, TRACE_LEN]} />
+    <mesh position={[mx, t.oy, mz]} rotation={[0, Math.atan2(t.dx, t.dz), 0]}>
+      <boxGeometry args={[0.025, 0.025, len]} />
       <meshBasicMaterial ref={mat} color="#ffe66d" transparent opacity={1} depthWrite={false} />
     </mesh>
   );
@@ -78,7 +79,7 @@ const TracesLayer = ({ shots }: { shots: ShotTrace[] }) => {
     const now = Date.now();
     setTraces(prev => {
       const alive = prev.filter(t => Date.now() - t.born < TRACE_LIFE);
-      const fresh = shots.map(s => ({ id: traceId++, ox: s[0], oz: s[1], dx: s[2], dz: s[3], born: now }));
+      const fresh = shots.map(s => ({ id: traceId++, ox: s[0], oy: s[1], oz: s[2], dx: s[3], dz: s[4], dist: s[5], born: now }));
       return [...alive, ...fresh];
     });
   }, [shots]);
@@ -204,7 +205,7 @@ const MinecraftPlayer = ({ player, gameMode, myTeam }: { player: PlayerState; ga
 
   useFrame((state, delta) => {
     // Smoothly interpolate position and rotation
-    targetPos.current.set(player.position.x, player.position.y, player.position.z);
+    targetPos.current.set(player.position.x, player.position.y - 1.0, player.position.z);
     groupRef.current.position.lerp(targetPos.current, 0.3);
     
     targetRotY.current = player.rotY;
@@ -245,7 +246,7 @@ const MinecraftPlayer = ({ player, gameMode, myTeam }: { player: PlayerState; ga
   // Arms pivot from shoulders. Legs pivot from waist.
 
   return (
-    <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]} scale={[1, crouchScale, 1]}>
+    <group ref={groupRef} position={[player.position.x, player.position.y - 1.0, player.position.z]} scale={[1, crouchScale, 1]}>
       {/* ── Glow border shell ── */}
       {showRedGlow && (
         <mesh position={[0, 1.0, 0]} scale={[1.1, 1.0, 1.1]}>
@@ -547,9 +548,11 @@ const ArenaGeometry = () => {
           if (Array.isArray(child.material)) {
             child.material.forEach((m: any) => {
               m.roughness = Math.max(m.roughness || 0, 0.65);
+              if (m.color) m.color.set("#737373"); // Cement grey
             });
           } else {
             child.material.roughness = Math.max(child.material.roughness || 0, 0.65);
+            if (child.material.color) child.material.color.set("#737373"); // Cement grey
           }
         }
       }

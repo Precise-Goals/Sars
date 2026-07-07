@@ -55,8 +55,7 @@ export class SarsMatchManager {
   public maxLobbySize = 8;
   
   public teamScores = { red: 0, blue: 0 };
-  public onShot?: (ox: number, oz: number, dx: number, dz: number) => void;
-  public pendingShots: [number, number, number, number][] = [];
+  public pendingShots: [number, number, number, number, number, number][] = [];
   
   public physics: RoomPhysics;
 
@@ -179,10 +178,25 @@ export class SarsMatchManager {
     let target: Player | null = null;
     for (const p of all) {
       if (p.id === bot.id) continue;
+      
       const dx = p.position.x - bot.position.x;
       const dz = p.position.z - bot.position.z;
       const d  = Math.hypot(dx, dz);
-      if (d < nearestDist) { nearestDist = d; target = p; }
+      
+      if (d < nearestDist) { 
+        // Only target if there is a clear line of sight
+        const headHeight = bot.position.y + 1.55;
+        const targetHeight = p.position.y + 1.55;
+        const hasLoS = this.physics.checkLineOfSight(
+            { x: bot.position.x, y: headHeight, z: bot.position.z },
+            { x: p.position.x, y: targetHeight, z: p.position.z }
+        );
+
+        if (hasLoS) {
+          nearestDist = d; 
+          target = p; 
+        }
+      }
     }
 
     if (target) {
@@ -220,9 +234,6 @@ export class SarsMatchManager {
         if (bot.ammo > 0) {
           bot.ammo -= 1;
           let shootRot = bot.rotY + (Math.random() - 0.5) * 0.15; // Tightened bot accuracy
-          if (this.onShot) {
-            this.onShot(bot.position.x, bot.position.z, -Math.sin(shootRot), -Math.cos(shootRot));
-          }
           this.applyHitscan(bot, shootRot);
           if (bot.ammo === 0) bot.reloadTicks = 45;
         } else {
@@ -290,7 +301,7 @@ export class SarsMatchManager {
       if (player.reloadTicks === 0 && player.shootCooldownTicks === 0) {
         if (player.ammo > 0) {
           player.ammo -= 1;
-          player.shootCooldownTicks = 4; // Fast fire rate
+          player.shootCooldownTicks = 10; // Tactical fire rate
           this.applyHitscan(player, player.rotY);
           if (player.ammo === 0) player.reloadTicks = 45;
         } else {
@@ -306,11 +317,23 @@ export class SarsMatchManager {
     const dirX = -Math.sin(rotY);
     const dirZ = -Math.cos(rotY);
 
+    // Precise weapon barrel offset (0.35 right, 0.3 forward)
+    const offsetX = 0.35;
+    const offsetZ = -0.3;
+    const rightX = Math.cos(rotY);
+    const rightZ = -Math.sin(rotY);
+
+    const gunX = shooter.position.x + (rightX * offsetX) + (dirX * Math.abs(offsetZ));
+    const gunZ = shooter.position.z + (rightZ * offsetX) + (dirZ * Math.abs(offsetZ));
     const bulletHeight = shooter.position.y + (shooter.isSliding ? 0.45 : shooter.isCrouching ? 0.75 : 1.55);
-    const origin = { x: shooter.position.x, y: bulletHeight, z: shooter.position.z };
+
+    const origin = { x: gunX, y: bulletHeight, z: gunZ };
     const direction = { x: dirX, y: 0, z: dirZ }; // Horizontal shooting
 
-    const hitId = this.physics.checkHitscan(origin, direction, 100.0);
+    const { hitId, distance } = this.physics.checkHitscan(origin, direction, 100.0);
+    
+    // Add visual tracer starting EXACTLY at the gun barrel, bounded by the hit distance
+    this.pendingShots.push([gunX, bulletHeight, gunZ, dirX, dirZ, distance]);
 
     if (hitId && hitId !== shooter.id) {
       const target = this.players.get(hitId);

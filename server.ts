@@ -112,20 +112,6 @@ async function startServer() {
           const msg = unpack(buf);
           const input = msg as InputData;
 
-          if (input.shoot) {
-            const shooter = match.players.get(ws.data.id);
-            if (shooter && shooter.reloadTicks === 0 && shooter.shootCooldownTicks === 0 && shooter.ammo > 0) {
-              const dirX = -Math.sin(shooter.rotY);
-              const dirZ = -Math.cos(shooter.rotY);
-              match.pendingShots.push([
-                shooter.position.x,
-                shooter.position.z,
-                dirX,
-                dirZ,
-              ]);
-            }
-          }
-
           match.processInput(ws.data.id, input);
         } catch (e) {
           console.error(`[Sars][${sessionId}] Bad message from ${ws.data.id}:`, e);
