@@ -174,10 +174,20 @@ export class SarsMatchManager {
   private tickBot(bot: Player, all: Player[]): void {
     let speed = BOT_BASE_SPEED;
 
+    // CS Bot Difficulty parameters
+    const diff = bot.difficulty || "easy";
+    let aimSpread = 0.2;
+    let shootChance = 0.05;
+    let strafeFreq = 0.02;
+
+    if (diff === "veteran") { aimSpread = 0.1; shootChance = 0.1; strafeFreq = 0.05; }
+    if (diff === "hardened") { aimSpread = 0.05; shootChance = 0.2; strafeFreq = 0.1; }
+    if (diff === "realtime") { aimSpread = 0.01; shootChance = 0.3; strafeFreq = 0.15; }
+
     let nearestDist = Infinity;
     let target: Player | null = null;
     for (const p of all) {
-      if (p.id === bot.id) continue;
+      if (p.id === bot.id || p.health <= 0) continue;
       
       const dx = p.position.x - bot.position.x;
       const dz = p.position.z - bot.position.z;
@@ -202,38 +212,65 @@ export class SarsMatchManager {
     if (target) {
       const dx = target.position.x - bot.position.x;
       const dz = target.position.z - bot.position.z;
-      bot.rotY = lerpAngle(bot.rotY, Math.atan2(-dx, -dz), 0.15); // Snappier aiming
+      // Snappier aiming for harder bots
+      const aimSpeed = diff === "realtime" ? 0.3 : diff === "hardened" ? 0.2 : 0.15;
+      bot.rotY = lerpAngle(bot.rotY, Math.atan2(-dx, -dz), aimSpeed); 
     } else {
       bot.rotY += (Math.random() - 0.5) * 0.15;
     }
 
     let dx = 0, dz = 0;
-    if (!target || nearestDist > 5) {
+    const botAny = bot as any;
+
+    if (!target) {
+      // Wander if no target
       dx = -Math.sin(bot.rotY) * speed * DT;
       dz = -Math.cos(bot.rotY) * speed * DT;
       bot.isSprinting = true;
+      bot.isCrouching = false;
     } else {
-      bot.isSprinting = false;
+      // Combat Movement
+      if (nearestDist > 15) {
+        // Chase
+        dx = -Math.sin(bot.rotY) * speed * DT;
+        dz = -Math.cos(bot.rotY) * speed * DT;
+        bot.isSprinting = true;
+      } else {
+        // Strafe & Shoot (CS Style)
+        bot.isSprinting = false;
+        
+        if (botAny.strafeTicks > 0) {
+          botAny.strafeTicks--;
+          dx = -Math.cos(bot.rotY) * (botAny.strafeDir * speed * 0.6) * DT;
+          dz = Math.sin(bot.rotY) * (botAny.strafeDir * speed * 0.6) * DT;
+        } else if (Math.random() < strafeFreq) {
+          botAny.strafeTicks = Math.floor(Math.random() * 45) + 15;
+          botAny.strafeDir = Math.random() < 0.5 ? 1 : -1;
+        }
+
+        // Randomly crouch for accuracy
+        if (Math.random() < 0.01) bot.isCrouching = !bot.isCrouching;
+      }
     }
 
-    // Bot Gravity & Jump
+    // Bot Gravity
     bot.velocityY += GRAVITY * DT;
     let dy = bot.velocityY * DT;
 
-    const res = this.physics.movePlayer(bot.id, { x: dx, y: dy, z: dz }, false);
+    const res = this.physics.movePlayer(bot.id, { x: dx, y: dy, z: dz });
     if (res && res.grounded) {
       bot.velocityY = -2.0;
-      // Randomly jump during combat if close
-      if (target && nearestDist < 12 && Math.random() < 0.02) {
+      // Rarely jump unless stuck
+      if (Math.random() < 0.005) {
         bot.velocityY = JUMP_VELOCITY;
       }
     }
 
-    if (target && Math.random() < BOT_SHOOT_CHANCE) {
+    if (target && Math.random() < shootChance) {
       if (bot.reloadTicks === 0) {
         if (bot.ammo > 0) {
           bot.ammo -= 1;
-          let shootRot = bot.rotY + (Math.random() - 0.5) * 0.15; // Tightened bot accuracy
+          let shootRot = bot.rotY + (Math.random() - 0.5) * aimSpread; 
           this.applyHitscan(bot, shootRot);
           if (bot.ammo === 0) bot.reloadTicks = 45;
         } else {
@@ -286,7 +323,7 @@ export class SarsMatchManager {
     let dy = player.velocityY * DT;
 
     // Apply exact collision resolving using Rapier Character Controller
-    const res = this.physics.movePlayer(playerId, { x: dx, y: dy, z: dz }, input.jump);
+    const res = this.physics.movePlayer(playerId, { x: dx, y: dy, z: dz });
 
     if (res && res.grounded) {
       player.velocityY = -2.0; // Stick slightly to slopes

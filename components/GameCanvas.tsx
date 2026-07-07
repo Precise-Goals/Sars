@@ -5,6 +5,8 @@ import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Sky, PointerLockControls, Text, Billboard, useGLTF } from "@react-three/drei";
 import { pack, unpack } from "msgpackr";
+import { FaPlay, FaGlobe, FaRobot, FaWallet } from "react-icons/fa";
+import { PlayerModel } from "./PlayerModel";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -22,6 +24,28 @@ interface PlayerState {
   ammo: number;
   reloadTicks: number;
   difficulty?: "easy" | "veteran" | "hardened" | "realtime";
+}
+
+function useLocalStorage<T>(key: string, initialValue: T) {
+  const [storedValue, setStoredValue] = useState<T>(() => {
+    if (typeof window === "undefined") return initialValue;
+    try {
+      const item = window.localStorage.getItem(key);
+      return item ? JSON.parse(item) : initialValue;
+    } catch (error) {
+      return initialValue;
+    }
+  });
+  const setValue = (value: T | ((val: T) => T)) => {
+    try {
+      const valueToStore = value instanceof Function ? value(storedValue) : value;
+      setStoredValue(valueToStore);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(key, JSON.stringify(valueToStore));
+      }
+    } catch (error) {}
+  };
+  return [storedValue, setValue] as const;
 }
 
 type ShotTrace = [number, number, number, number, number, number]; // [ox, oy, oz, dx, dz, dist]
@@ -62,7 +86,7 @@ const BulletTrace = ({ t }: { t: Trace }) => {
   const mz = t.oz + t.dz * len / 2;
   return (
     <mesh position={[mx, t.oy, mz]} rotation={[0, Math.atan2(t.dx, t.dz), 0]}>
-      <boxGeometry args={[0.025, 0.025, len]} />
+      <boxGeometry args={[0.06, 0.06, len]} />
       <meshBasicMaterial ref={mat} color="#ffe66d" transparent opacity={1} depthWrite={false} />
     </mesh>
   );
@@ -79,7 +103,16 @@ const TracesLayer = ({ shots }: { shots: ShotTrace[] }) => {
     const now = Date.now();
     setTraces(prev => {
       const alive = prev.filter(t => Date.now() - t.born < TRACE_LIFE);
-      const fresh = shots.map(s => ({ id: traceId++, ox: s[0], oy: s[1], oz: s[2], dx: s[3], dz: s[4], dist: s[5], born: now }));
+      const fresh = shots.map(s => ({ 
+        id: traceId++, 
+        ox: s[0] ?? 0, 
+        oy: s[1] ?? 1.55, 
+        oz: s[2] ?? 0, 
+        dx: s[3] ?? 0, 
+        dz: s[4] ?? 1, 
+        dist: s[5] ?? 100, 
+        born: now 
+      }));
       return [...alive, ...fresh];
     });
   }, [shots]);
@@ -338,9 +371,10 @@ const MinecraftPlayer = ({ player, gameMode, myTeam }: { player: PlayerState; ga
 
 // ─── CameraRig ────────────────────────────────────────────────────────────────
 
-const CameraRig = ({ myPlayer, locked }: {
+const CameraRig = ({ myPlayer, locked, isThirdPerson }: {
   myPlayer: PlayerState | undefined;
   locked: boolean;
+  isThirdPerson: boolean;
 }) => {
   const { camera } = useThree();
   const targetPos  = useRef(new THREE.Vector3(0, 1.8, 0));
@@ -360,13 +394,24 @@ const CameraRig = ({ myPlayer, locked }: {
   useFrame(() => {
     if (!myPlayer) return;
     const eyeH = myPlayer.isCrouching ? 1.0 : myPlayer.isSliding ? 0.7 : 1.8;
-    targetPos.current.set(myPlayer.position.x, myPlayer.position.y + eyeH, myPlayer.position.z);
+    
+    if (isThirdPerson) {
+      // 3rd person camera: pushed backward relative to where it's looking
+      const basePos = new THREE.Vector3(myPlayer.position.x, myPlayer.position.y + eyeH, myPlayer.position.z);
+      const offset = new THREE.Vector3(0, 0.5, 4.0); // Up 0.5, Back 4.0
+      offset.applyQuaternion(camera.quaternion);
+      targetPos.current.copy(basePos).add(offset);
+    } else {
+      // 1st person camera
+      targetPos.current.set(myPlayer.position.x, myPlayer.position.y + eyeH, myPlayer.position.z);
+    }
+    
     camera.position.lerp(targetPos.current, 0.3);
   });
 
   // Gun is always mounted (camera.add keeps it hidden when not locked naturally
   // via pointer lock — but we conditionally render for cleanliness)
-  return locked ? (
+  return (locked && !isThirdPerson) ? (
     <FirstPersonGun
       isSprinting={myPlayer?.isSprinting ?? false}
       isCrouching={myPlayer?.isCrouching ?? false}
@@ -529,7 +574,7 @@ const NetworkController = ({
         setTimeout(() => setCanLock(true), 1500); // Browser security cooldown
       }}
       pointerSpeed={sensitivity}
-      selector="#play-button"
+      selector="#hidden-locker"
     />
   );
 };
@@ -548,11 +593,9 @@ const ArenaGeometry = () => {
           if (Array.isArray(child.material)) {
             child.material.forEach((m: any) => {
               m.roughness = Math.max(m.roughness || 0, 0.65);
-              if (m.color) m.color.set("#737373"); // Cement grey
             });
           } else {
             child.material.roughness = Math.max(child.material.roughness || 0, 0.65);
-            if (child.material.color) child.material.color.set("#737373"); // Cement grey
           }
         }
       }
@@ -568,6 +611,7 @@ useGLTF.preload("/assets/map.glb");
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function GameCanvas() {
+  const [inGame,    setInGame]    = useState(false);
   const [frame,     setFrame]     = useState<ServerFrame>({ players: [], shots: [] });
   const [localId,   setLocalId]   = useState<string | null>(null);
   const [locked,    setLocked]    = useState(false);
@@ -576,9 +620,22 @@ export default function GameCanvas() {
   const [ws,        setWs]        = useState<WebSocket | null>(null);
 
   const [sensitivity, setSensitivity] = useState(1.0);
-  const [botDifficultySetting, setBotDifficultySetting] = useState<"random" | "easy" | "veteran" | "hardened" | "realtime">("random");
+  const [botDifficultySetting, setBotDifficultySetting] = useLocalStorage<"random" | "easy" | "veteran" | "hardened" | "realtime">("sars_botDifficulty", "random");
   const [showSettings, setShowSettings] = useState(false);
   const [sessionId, setSessionId] = useState("default");
+  const [playerName, setPlayerName] = useLocalStorage("sars_playerName", "NOVAK");
+  const [isThirdPerson, setIsThirdPerson] = useState(false);
+
+  useEffect(() => {
+    const handleGlobalKey = (e: KeyboardEvent) => {
+      if (e.code === "F5") {
+        e.preventDefault();
+        setIsThirdPerson(prev => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKey);
+    return () => window.removeEventListener("keydown", handleGlobalKey);
+  }, []);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -887,94 +944,279 @@ export default function GameCanvas() {
       )}
 
       {/* ── Cooldown Click Blocker ─────────────────────────────────────────── */}
-      {!canLock && (
-        <div className="absolute inset-0 z-50 pointer-events-auto cursor-wait" />
+      {!canLock && inGame && (
+        <div className="absolute inset-0 z-[60] pointer-events-auto cursor-wait bg-black/10" />
       )}
 
-      {/* ── Click-to-play splash ──────────────────────────────────────────── */}
-      {!locked && (
-        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-gradient-to-b from-black/85 to-black/65 backdrop-blur-sm pointer-events-none select-none">
-          <div className="text-center">
-            <div className="text-white text-6xl font-black tracking-[0.5em] mb-1 drop-shadow-2xl">SARS</div>
-            <div className="text-zinc-500 text-xs font-bold tracking-[0.4em] mb-4">MULTIPLAYER FPS</div>
-            
-            {/* Giant PLAY Button */}
-            <div className="mb-6 flex justify-center pointer-events-auto">
-              <button
-                id="play-button"
-                type="button"
-                className={`group relative inline-flex items-center justify-center gap-3 px-16 py-6 bg-blue-600 rounded-2xl border-b-[6px] border-blue-800 text-white font-black text-3xl tracking-[0.2em] shadow-[0_0_50px_rgba(37,99,235,0.4)] transition-all duration-150 active:translate-y-1.5 active:border-b-0 cursor-pointer ${canLock ? "hover:bg-blue-500 hover:shadow-[0_0_80px_rgba(59,130,246,0.6)]" : "opacity-50"}`}
-              >
-                {canLock ? "CLICK TO PLAY" : "PLEASE WAIT..."}
+      {/* ── Pause / In-Game Overlay ──────────────────────────────────────── */}
+      {inGame && !locked && !showSettings && (
+        <div 
+          className="absolute inset-0 z-40 flex flex-col justify-center px-16 bg-black/60 backdrop-blur-xl pointer-events-auto select-none"
+        >
+           {/* Reddish tint overlay */}
+           <div className="absolute inset-0 bg-red-950/20 pointer-events-none mix-blend-color-burn" />
+
+           <div className="relative z-10 max-w-md w-full">
+             <h1 className="text-white text-5xl font-black tracking-[0.4em] mb-2 uppercase">Paused</h1>
+             <div className="w-12 h-1 bg-red-600 mb-10" />
+
+             <div className="flex flex-col gap-3">
+               <button onClick={() => {
+                 setCanLock(true);
+                 document.querySelector('canvas')?.requestPointerLock();
+               }} className="flex items-center gap-4 bg-red-600 hover:bg-red-500 text-white px-6 py-4 rounded-lg font-black tracking-widest text-xs transition-all shadow-[0_0_20px_rgba(220,38,38,0.4)]">
+                 <FaPlay className="text-sm" /> RESUME GAME
+               </button>
+               <button onClick={() => alert("Coming soon")} className="flex items-center gap-4 bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 px-6 py-4 rounded-lg font-bold tracking-widest text-xs transition-all">
+                 <span className="text-lg">🔫</span> LOADOUT
+               </button>
+               <button onClick={() => setShowSettings(true)} className="flex items-center gap-4 bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 px-6 py-4 rounded-lg font-bold tracking-widest text-xs transition-all">
+                 <span className="text-lg">⚙️</span> SETTINGS
+               </button>
+               <button onClick={() => alert("Coming soon")} className="flex items-center gap-4 bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 px-6 py-4 rounded-lg font-bold tracking-widest text-xs transition-all">
+                 <span className="text-lg">👥</span> CHANGE TEAM
+               </button>
+               <button onClick={() => {
+                 setInGame(false);
+                 if (ws) ws.close();
+               }} className="flex items-center gap-4 bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 px-6 py-4 rounded-lg font-bold tracking-widest text-xs transition-all">
+                 <span className="text-lg">🚪</span> LEAVE MATCH
+               </button>
+             </div>
+
+             {/* Match Info Card */}
+             <div className="mt-10 bg-zinc-950/90 border border-zinc-800 rounded-xl p-4 flex gap-4 backdrop-blur-md shadow-2xl">
+               <div className="w-24 h-24 bg-zinc-800 rounded-lg overflow-hidden shrink-0 border border-zinc-700 relative">
+                  <div className="absolute inset-0 bg-red-600/30 mix-blend-color-burn" />
+                  <img src="/assets/background.png" className="w-full h-full object-cover opacity-80" alt="Map" />
+               </div>
+               <div className="flex-1 flex flex-col justify-center">
+                 <div className="text-red-600 font-black tracking-widest text-[9px] uppercase mb-1">{gameMode.replace(/([A-Z])/g, ' $1').trim()}</div>
+                 <div className="text-white font-black tracking-widest text-lg mb-2">ARENA</div>
+                 <div className="text-zinc-500 text-[10px] font-medium leading-relaxed">
+                   Eliminate the enemy team.<br/>First team to reach the score limit wins.
+                 </div>
+               </div>
+               <div className="w-px bg-zinc-800 mx-2" />
+               <div className="flex flex-col items-center justify-center min-w-[80px]">
+                 <div className="text-red-500 font-bold tracking-widest text-[9px] mb-1 uppercase">YOUR TEAM</div>
+                 <div className="text-red-500 font-black text-2xl mb-2 leading-none">{teamScores?.red ?? 0}</div>
+                 <div className="text-zinc-600 font-black tracking-widest text-[9px] mb-2 leading-none">VS</div>
+                 <div className="text-green-500 font-bold tracking-widest text-[9px] mb-1 uppercase">ENEMY TEAM</div>
+                 <div className="text-green-500 font-black text-2xl leading-none">{teamScores?.blue ?? 0}</div>
+               </div>
+             </div>
+           </div>
+
+           <div className="absolute bottom-12 right-12">
+             <button onClick={() => setCanLock(true)} className="flex items-center gap-2 border border-zinc-800 bg-black/60 hover:bg-black/80 px-4 py-2 rounded-lg text-white font-bold tracking-widest text-xs transition-all cursor-pointer">
+               <span className="bg-zinc-800 px-1.5 py-0.5 rounded text-[10px]">ESC</span> BACK
+             </button>
+           </div>
+        </div>
+      )}
+
+      {/* ── Web3 Aesthetic Home Screen ───────────────────────────────────── */}
+      {!inGame && (
+        <div 
+          className="absolute inset-0 z-50 flex flex-col justify-between bg-zinc-950 bg-cover bg-center bg-no-repeat"
+          style={{ backgroundImage: `url('/assets/background.png')` }}
+        >
+          {/* Top Nav Bar */}
+          <div className="flex items-center justify-between px-8 py-6 bg-gradient-to-b from-black/80 to-transparent">
+            <div className="flex items-center gap-4">
+              <div className="bg-orange-600 p-2 rounded-lg shadow-[0_0_15px_rgba(234,88,12,0.5)]">
+                <FaPlay className="text-white text-sm" />
+              </div>
+              <div className="flex flex-col">
+                <h1 className="text-white font-black tracking-[0.2em] text-xl leading-none">SARS</h1>
+                <span className="text-zinc-500 font-bold tracking-[0.4em] text-[10px]">MULTIPLAYER</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-6">
+              <div className="flex items-center gap-2 px-4 py-1.5 bg-black/40 backdrop-blur-md rounded-full border border-white/5">
+                <div className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
+                <span className="text-zinc-400 font-bold tracking-widest text-[10px] uppercase">Connected • <span className="text-white">24.5 MS</span></span>
+              </div>
+              <button className="text-zinc-400 hover:text-white transition-colors cursor-pointer" onClick={() => setShowSettings(!showSettings)}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
               </button>
             </div>
+          </div>
 
-            {/* Sub options */}
-            <div className="flex gap-4 justify-center pointer-events-auto">
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  selectMode("real");
-                }}
-                className="px-6 py-3 bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600 hover:bg-zinc-800 text-[11px] font-black tracking-widest rounded-xl transition-all cursor-pointer"
-              >
-                REAL MATCHMAKING
-              </button>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  selectMode("practice");
-                }}
-                className="px-6 py-3 bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600 hover:bg-zinc-800 text-[11px] font-black tracking-widest rounded-xl transition-all cursor-pointer"
-              >
-                PRACTICE BOTS
-              </button>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  selectMode("explore");
-                }}
-                className="px-6 py-3 bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600 hover:bg-zinc-800 text-[11px] font-black tracking-widest rounded-xl transition-all cursor-pointer"
-              >
-                EXPLORE MAP
-              </button>
+          {/* Main Layout Area */}
+          <div className="flex-1 flex px-12 pb-12 w-full h-full relative pointer-events-none">
+            {/* Left Column */}
+            <div className="flex flex-col justify-center max-w-xl pointer-events-auto mt-16">
+              <h1 className="text-7xl md:text-[5.5rem] font-black tracking-[0.2em] mb-2 text-white drop-shadow-2xl">S A R S</h1>
+              <h2 className="text-orange-600 font-bold tracking-[0.4em] text-sm mb-6 drop-shadow-md">MULTIPLAYER FPS</h2>
+              <p className="text-zinc-300 font-medium tracking-wide text-sm leading-relaxed mb-8 max-w-sm">
+                Fast-paced arena combat. Pure skill.<br/>
+                No loadouts. No unlocks. Just you vs everyone.
+              </p>
+
+              {/* Action Buttons */}
+              <div className="flex items-center gap-4 mb-8">
+                <button onClick={() => setInGame(true)} className="flex items-center justify-center gap-3 bg-orange-600 hover:bg-orange-500 text-white px-10 py-4 rounded-lg font-black tracking-widest text-sm transition-all shadow-[0_0_30px_rgba(234,88,12,0.3)]">
+                  <FaPlay /> PLAY NOW
+                </button>
+                <button onClick={() => { selectMode("practice"); setInGame(true); }} className="flex items-center justify-center gap-3 bg-black/40 hover:bg-black/60 border border-zinc-700 hover:border-zinc-500 backdrop-blur-md text-white px-10 py-4 rounded-lg font-black tracking-widest text-sm transition-all">
+                  <FaRobot /> PRACTICE
+                </button>
+              </div>
+
+              {/* Mode Cards row 1 */}
+              <div className="flex gap-4 mb-8">
+                <div className="flex items-center gap-4 bg-black/60 backdrop-blur-md border border-white/5 rounded-xl p-5 flex-1 hover:bg-black/80 transition-colors cursor-pointer" onClick={() => { selectMode("real"); setInGame(true); }}>
+                  <div className="text-zinc-400 text-2xl"><FaGlobe /></div>
+                  <div>
+                    <h3 className="text-white font-bold tracking-widest text-xs mb-1">QUICK PLAY</h3>
+                    <p className="text-zinc-400 text-[10px] mb-1">Jump into a match</p>
+                    <p className="text-purple-400 text-[9px] font-bold tracking-wider">● 1,234 Players Online</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4 bg-black/60 backdrop-blur-md border border-white/5 rounded-xl p-5 flex-1 hover:bg-black/80 transition-colors cursor-pointer" onClick={() => { selectMode("explore"); setInGame(true); }}>
+                  <div className="text-orange-600 text-2xl"><FaGlobe /></div>
+                  <div>
+                    <h3 className="text-white font-bold tracking-widest text-xs mb-1">SERVER BROWSER</h3>
+                    <p className="text-zinc-400 text-[10px] mb-1">Browse custom servers</p>
+                    <p className="text-orange-500 text-[9px] font-bold tracking-wider">89 Active Servers</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Featured row */}
+              <div>
+                <h4 className="text-zinc-500 font-bold tracking-[0.2em] text-[10px] mb-3 uppercase">Featured</h4>
+                <div className="flex gap-3">
+                  <div onClick={() => { selectMode("real"); setInGame(true); }} className="bg-black/60 backdrop-blur-md border border-white/5 rounded-xl p-4 flex-1 relative overflow-hidden group hover:border-white/20 transition-all cursor-pointer">
+                    <div className="absolute inset-0 bg-red-500/10 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    <h3 className="text-white font-bold tracking-widest text-[10px] mb-2 relative z-10">TEAM DEATHMATCH</h3>
+                    <span className="text-red-500 font-bold text-[10px] relative z-10">6v6</span>
+                  </div>
+                  <div onClick={() => { selectMode("practice"); setInGame(true); }} className="bg-black/60 backdrop-blur-md border border-white/5 rounded-xl p-4 flex-1 relative overflow-hidden group hover:border-white/20 transition-all cursor-pointer">
+                    <div className="absolute inset-0 bg-blue-500/10 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    <h3 className="text-white font-bold tracking-widest text-[10px] mb-2 relative z-10">FREE FOR ALL</h3>
+                    <span className="text-blue-500 font-bold text-[10px] relative z-10">8 Players</span>
+                  </div>
+                  <div onClick={() => { selectMode("explore"); setInGame(true); }} className="bg-black/60 backdrop-blur-md border border-white/5 rounded-xl p-4 flex-1 relative overflow-hidden group hover:border-white/20 transition-all cursor-pointer">
+                    <div className="absolute inset-0 bg-yellow-500/10 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    <h3 className="text-white font-bold tracking-widest text-[10px] mb-2 relative z-10">EXPLORE</h3>
+                    <span className="text-yellow-500 font-bold text-[10px] relative z-10">Free Roam</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Column (Challenges) */}
+            <div className="absolute bottom-12 right-12 pointer-events-auto">
+              <div className="bg-black/60 backdrop-blur-xl border border-white/5 rounded-xl p-6 w-80">
+                <div className="flex justify-between items-center mb-6">
+                  <h4 className="text-white font-bold tracking-[0.1em] text-[11px] uppercase">Daily Challenges</h4>
+                  <span className="text-orange-600 font-black tracking-widest text-[10px]">SARS</span>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <div className="flex justify-between text-[10px] font-bold text-zinc-300 mb-2">
+                      <span>Get 25 Headshots</span>
+                      <span>13 / 25</span>
+                    </div>
+                    <div className="w-full bg-white/10 h-1 rounded-full overflow-hidden">
+                      <div className="bg-orange-600 h-full" style={{ width: '52%' }} />
+                    </div>
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-[10px] font-bold text-zinc-300 mb-2">
+                      <span>Win 3 Matches</span>
+                      <span>1 / 3</span>
+                    </div>
+                    <div className="w-full bg-white/10 h-1 rounded-full overflow-hidden">
+                      <div className="bg-orange-600 h-full" style={{ width: '33%' }} />
+                    </div>
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-[10px] font-bold text-zinc-300 mb-2">
+                      <span>Get 50 Kills</span>
+                      <span>28 / 50</span>
+                    </div>
+                    <div className="w-full bg-white/10 h-1 rounded-full overflow-hidden">
+                      <div className="bg-orange-600 h-full" style={{ width: '56%' }} />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-6 flex items-center gap-2 text-zinc-500 text-[9px] font-bold tracking-widest">
+                  <FaGlobe /> RESETS IN <span className="text-zinc-300">12:45:32</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Bottom Left Profile */}
+            <div className="absolute bottom-12 left-12 flex items-center gap-4 pointer-events-auto">
+              <div className="w-12 h-12 rounded-full border border-white/20 bg-black/40 backdrop-blur-md flex items-center justify-center text-white font-black uppercase text-xl">
+                {playerName.charAt(0)}
+              </div>
+              <div>
+                <input 
+                  type="text" 
+                  value={playerName}
+                  onChange={(e) => setPlayerName(e.target.value)}
+                  className="bg-transparent text-white font-bold tracking-widest text-xs uppercase outline-none w-24 placeholder:text-zinc-600"
+                  placeholder="NAME"
+                  maxLength={10}
+                />
+                <div className="text-zinc-500 font-medium text-[10px] mb-1">Level 24</div>
+                <div className="w-32 bg-white/10 h-0.5 rounded-full overflow-hidden">
+                  <div className="bg-orange-600 h-full" style={{ width: '40%' }} />
+                </div>
+              </div>
             </div>
           </div>
         </div>
       )}
 
+
+
+      {/* ── Hidden Locker for PointerLockControls ── */}
+      <div id="hidden-locker" style={{ display: 'none' }} />
+
       {/* ── Three.js Canvas ───────────────────────────────────────────────── */}
-      <Canvas
-        shadows={{ type: THREE.PCFShadowMap }}
-        camera={{ fov: 80, near: 0.05, far: 600, position: [0, 1.8, 0] }}
-        style={{ position: "absolute", inset: 0 }}
-      >
-        <Sky sunPosition={[80, 25, 80]} turbidity={6} rayleigh={0.6} />
-        <ambientLight intensity={0.3} />
-        <directionalLight position={[30, 60, 20]} intensity={1.5} castShadow
-          shadow-mapSize={[2048, 2048]}
-          shadow-camera-far={200}
-          shadow-camera-left={-80} shadow-camera-right={80}
-          shadow-camera-top={80}  shadow-camera-bottom={-80}
-        />
-        <hemisphereLight args={["#87ceeb", "#0f172a", 0.25]} />
+      {inGame && (
+        <Canvas
+          shadows={{ type: THREE.PCFShadowMap }}
+          camera={{ fov: 80, near: 0.05, far: 600, position: [0, 1.8, 0] }}
+          style={{ position: "absolute", inset: 0 }}
+        >
+          <Sky sunPosition={[80, 25, 80]} turbidity={6} rayleigh={0.6} />
+          <ambientLight intensity={0.3} />
+          <directionalLight position={[30, 60, 20]} intensity={1.5} castShadow
+            shadow-mapSize={[2048, 2048]}
+            shadow-camera-far={200}
+            shadow-camera-left={-80} shadow-camera-right={80}
+            shadow-camera-top={80}  shadow-camera-bottom={-80}
+          />
+          <hemisphereLight args={["#87ceeb", "#0f172a", 0.25]} />
 
-        <React.Suspense fallback={null}>
-          <ArenaGeometry />
-        </React.Suspense>
-        <TracesLayer shots={frame.shots} />
-        <NetworkController setFrame={setFrame} setLocalId={setLocalId} setLocked={setLocked} setCanLock={setCanLock} setWsStatus={setWsStatus} setWs={setWs} setSessionId={setSessionId} sensitivity={sensitivity} />
-        <CameraRig myPlayer={myPlayer} locked={locked} />
+          <React.Suspense fallback={null}>
+            <ArenaGeometry />
+          </React.Suspense>
+          <TracesLayer shots={frame.shots} />
+          <NetworkController setFrame={setFrame} setLocalId={setLocalId} setLocked={setLocked} setCanLock={setCanLock} setWsStatus={setWsStatus} setWs={setWs} setSessionId={setSessionId} sensitivity={sensitivity} />
+          <CameraRig myPlayer={myPlayer} locked={locked} isThirdPerson={isThirdPerson} />
 
-        {/* Enemies — every player except local */}
-        {frame.players
-          .filter(p => p.id !== localId)
-          .map(p => <MinecraftPlayer key={p.id} player={p} gameMode={gameMode} myTeam={myPlayer?.team} />)
-        }
-      </Canvas>
+          {/* Local Player (Self) */}
+          {myPlayer && (
+            <PlayerModel key={`local-${myPlayer.id}`} position={myPlayer.position} rotY={myPlayer.rotY} isSprinting={myPlayer.isSprinting} isCrouching={myPlayer.isCrouching} isSliding={myPlayer.isSliding} velocityY={0} isBot={false} isSelf={true} isThirdPerson={isThirdPerson} />
+          )}
+
+          {/* Enemies — every player except local */}
+          {frame.players
+            .filter(p => p.id !== localId)
+            .map(p => <PlayerModel key={p.id} position={p.position} rotY={p.rotY} isSprinting={p.isSprinting} isCrouching={p.isCrouching ?? false} isSliding={p.isSliding} velocityY={0} isBot={p.isBot} isSelf={false} />)
+          }
+        </Canvas>
+      )}
     </div>
   );
 }
