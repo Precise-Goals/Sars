@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Sky, PointerLockControls, Text, Billboard } from "@react-three/drei";
+import { Sky, PointerLockControls, Text, Billboard, useGLTF } from "@react-three/drei";
 import { pack, unpack } from "msgpackr";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ type ShotTrace = [number, number, number, number]; // [ox, oz, dx, dz]
 interface ServerFrame {
   players: PlayerState[];
   shots: ShotTrace[];
-  gameMode?: "ffa" | "tdm";
+  gameMode?: "practice" | "explore" | "real";
   teamScores?: { red: number; blue: number };
 }
 
@@ -190,94 +190,145 @@ const FirstPersonGun = ({ isSprinting, isCrouching, isShooting }: {
   );
 };
 
-// ─── Enemy player model ───────────────────────────────────────────────────────
-
-const EnemyPlayer = ({ player, gameMode, myTeam }: { player: PlayerState; gameMode: "ffa" | "tdm"; myTeam?: "red" | "blue" }) => {
+const MinecraftPlayer = ({ player, gameMode, myTeam }: { player: PlayerState; gameMode: string; myTeam?: string }) => {
   const groupRef = useRef<THREE.Group>(null!);
+  const leftArm = useRef<THREE.Mesh>(null!);
+  const rightArm = useRef<THREE.Mesh>(null!);
+  const leftLeg = useRef<THREE.Mesh>(null!);
+  const rightLeg = useRef<THREE.Mesh>(null!);
+
   const targetPos = useRef(new THREE.Vector3(player.position.x, player.position.y, player.position.z));
   const targetRotY = useRef(player.rotY);
+  const lastPos = useRef(new THREE.Vector3(player.position.x, player.position.y, player.position.z));
+  const swingTime = useRef(0);
 
-  useFrame(() => {
+  useFrame((state, delta) => {
+    // Smoothly interpolate position and rotation
     targetPos.current.set(player.position.x, player.position.y, player.position.z);
-    groupRef.current.position.lerp(targetPos.current, 0.25);
+    groupRef.current.position.lerp(targetPos.current, 0.3);
+    
     targetRotY.current = player.rotY;
     groupRef.current.rotation.y = THREE.MathUtils.lerp(
-      groupRef.current.rotation.y, targetRotY.current, 0.25
+      groupRef.current.rotation.y, targetRotY.current, 0.3
     );
+
+    // Calculate actual speed based on position changes for procedural animation
+    const speed = groupRef.current.position.distanceTo(lastPos.current) / (delta || 0.016);
+    lastPos.current.copy(groupRef.current.position);
+    
+    if (speed > 1.0) {
+      // Running/Walking swing speed
+      swingTime.current += delta * (player.isSprinting ? 12.0 : 8.0);
+    } else {
+      // Idle reset
+      swingTime.current = THREE.MathUtils.lerp(swingTime.current, 0, 0.1);
+    }
+
+    const swing = Math.sin(swingTime.current);
+    const swingMax = player.isSprinting ? 1.0 : 0.6; // Sprinting increases swing angle
+    
+    if (leftArm.current) leftArm.current.rotation.x = swing * swingMax;
+    if (rightArm.current) rightArm.current.rotation.x = -swing * swingMax;
+    if (leftLeg.current) leftLeg.current.rotation.x = -swing * swingMax;
+    if (rightLeg.current) rightLeg.current.rotation.x = swing * swingMax;
   });
 
   const crouchScale = player.isCrouching || player.isSliding ? 0.65 : 1;
-  const isEnemy = gameMode === "ffa" || (player.team !== myTeam);
+  const isEnemy = true; // For now all bots/players are enemies except self
   
-  let bodyColor = "#3b82f6";
-  if (gameMode === "tdm") {
-    if (player.team === myTeam) {
-      bodyColor = "#3b82f6";
-    } else {
-      bodyColor = "#ef4444";
-    }
-  } else {
-    bodyColor = "#3b82f6";
-  }
-
-  const showRedGlow = isEnemy;
+  let bodyColor = player.isBot ? "#3b82f6" : "#ef4444";
+  const showRedGlow = isEnemy && !player.isBot;
   const shortLabel = player.id.slice(0, 11);
 
+  // Minecraft dimensions based on Y=0 floor:
+  // Leg: 0.75 height. Body: 0.75 height. Head: 0.5 height.
+  // Arms pivot from shoulders. Legs pivot from waist.
+
   return (
-    <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
-      {/* Glow border shell */}
+    <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]} scale={[1, crouchScale, 1]}>
+      {/* ── Glow border shell ── */}
       {showRedGlow && (
-        <mesh position={[0, crouchScale, 0]} scale={[1.08, crouchScale, 1.08]}>
-          <cylinderGeometry args={[0.5, 0.5, 2, 16]} />
+        <mesh position={[0, 1.0, 0]} scale={[1.1, 1.0, 1.1]}>
+          <boxGeometry args={[0.8, 2.0, 0.8]} />
           <meshBasicMaterial color="#ef4444" wireframe transparent opacity={0.25} />
         </mesh>
       )}
 
-      {/* ── Body cylinder */}
-      <mesh position={[0, crouchScale, 0]} scale={[1, crouchScale, 1]} castShadow>
-        <cylinderGeometry args={[0.5, 0.5, 2, 16]} />
-        <meshStandardMaterial color={bodyColor} roughness={0.45} metalness={0.25} />
-      </mesh>
-
-      {/* ── Head sphere */}
-      <mesh position={[0, crouchScale * 2 + 0.45, 0]} castShadow>
-        <sphereGeometry args={[0.35, 14, 14]} />
-        <meshStandardMaterial color={bodyColor} roughness={0.3} />
-      </mesh>
-
-      {/* ── L-shape gun in right hand */}
-      <group position={[0.55, crouchScale * 1.1, -0.15]}>
-        {/* Barrel */}
-        <mesh position={[0, 0.02, -0.13]}>
-          <boxGeometry args={[0.05, 0.05, 0.3]} />
-          <meshStandardMaterial color="#1a1a1a" metalness={0.9} roughness={0.2} />
+      {/* ── Legs (Pivot at y=0.75) ── */}
+      <group position={[0, 0.75, 0]}>
+        {/* Left Leg */}
+        <mesh ref={leftLeg} position={[-0.15, -0.375, 0]}>
+          <boxGeometry args={[0.2, 0.75, 0.2]} />
+          <meshStandardMaterial color="#1e3a8a" roughness={0.9} />
         </mesh>
-        {/* Grip */}
-        <mesh position={[0, -0.07, 0.03]}>
-          <boxGeometry args={[0.05, 0.14, 0.06]} />
-          <meshStandardMaterial color="#2a1f1a" roughness={0.8} />
+        {/* Right Leg */}
+        <mesh ref={rightLeg} position={[0.15, -0.375, 0]}>
+          <boxGeometry args={[0.2, 0.75, 0.2]} />
+          <meshStandardMaterial color="#1e3a8a" roughness={0.9} />
         </mesh>
       </group>
 
-      {/* ── Health bar + name */}
-      <Billboard position={[0, crouchScale * 2 + 1.0, 0]}>
-        {/* Background bar */}
+      {/* ── Body (V-shaped Trapezium) ── */}
+      {/* We use a cylinder with 4 segments rotated 45 degrees to make a box with different top/bottom radii */}
+      <mesh position={[0, 1.125, 0]} rotation={[0, Math.PI / 4, 0]} castShadow>
+        <cylinderGeometry args={[0.35, 0.25, 0.75, 4]} />
+        <meshStandardMaterial color={bodyColor} roughness={0.7} />
+      </mesh>
+
+      {/* ── Arms (Pivot at shoulders y=1.4) ── */}
+      <group position={[0, 1.4, 0]}>
+        {/* Left Arm */}
+        <mesh ref={leftArm} position={[-0.35, -0.3, 0]}>
+          <boxGeometry args={[0.18, 0.7, 0.18]} />
+          <meshStandardMaterial color="#fbbf24" roughness={0.5} />
+        </mesh>
+        {/* Right Arm (Holding Gun) */}
+        <mesh ref={rightArm} position={[0.35, -0.3, 0]}>
+          <boxGeometry args={[0.18, 0.7, 0.18]} />
+          <meshStandardMaterial color="#fbbf24" roughness={0.5} />
+          {/* L-shape gun in right hand */}
+          <group position={[0, -0.35, -0.15]}>
+            <mesh position={[0, 0.02, -0.13]}>
+              <boxGeometry args={[0.05, 0.05, 0.3]} />
+              <meshStandardMaterial color="#1a1a1a" metalness={0.9} roughness={0.2} />
+            </mesh>
+            <mesh position={[0, -0.07, 0.03]}>
+              <boxGeometry args={[0.05, 0.14, 0.06]} />
+              <meshStandardMaterial color="#2a1f1a" roughness={0.8} />
+            </mesh>
+          </group>
+        </mesh>
+      </group>
+
+      {/* ── Head (Box) ── */}
+      <mesh position={[0, 1.75, 0]} castShadow>
+        <boxGeometry args={[0.45, 0.45, 0.45]} />
+        <meshStandardMaterial color="#fca5a5" roughness={0.3} />
+        {/* Simple Eyes */}
+        <mesh position={[-0.1, 0.05, -0.23]}>
+          <boxGeometry args={[0.05, 0.05, 0.02]} />
+          <meshStandardMaterial color="#000" />
+        </mesh>
+        <mesh position={[0.1, 0.05, -0.23]}>
+          <boxGeometry args={[0.05, 0.05, 0.02]} />
+          <meshStandardMaterial color="#000" />
+        </mesh>
+      </mesh>
+
+      {/* ── Health bar + name ── */}
+      <Billboard position={[0, 2.2, 0]}>
         <mesh position={[0, 0.16, 0]}>
           <planeGeometry args={[1.2, 0.12]} />
           <meshBasicMaterial color="#111" transparent opacity={0.7} />
         </mesh>
-        {/* Health fill */}
         <mesh position={[-(1.2 - (1.2 * player.health) / 100) / 2, 0.16, 0.001]}
               scale={[(player.health / 100), 1, 1]}>
           <planeGeometry args={[1.2, 0.12]} />
-          <meshBasicMaterial
-            color={player.health > 60 ? "#22c55e" : player.health > 30 ? "#f59e0b" : "#ef4444"}
-          />
+          <meshBasicMaterial color={player.health > 60 ? "#22c55e" : player.health > 30 ? "#f59e0b" : "#ef4444"} />
         </mesh>
-        {/* Label */}
         <Text fontSize={0.22} color="white" anchorX="center" anchorY="middle"
               outlineWidth={0.04} outlineColor="#000" position={[0, 0, 0.002]}>
-          {`${player.isBot ? `🤖 [${(player.difficulty ?? "easy").toUpperCase()}]` : "🎮"} ${gameMode === "tdm" ? (player.team === "red" ? "[RED] " : "[BLUE] ") : ""}${shortLabel}  ♥${player.health}`}
+          {`${player.isBot ? `🤖 [${(player.difficulty ?? "easy").toUpperCase()}]` : "🎮"} ${shortLabel}  ♥${player.health}`}
         </Text>
       </Billboard>
     </group>
@@ -333,8 +384,10 @@ const NetworkController = ({
   setFrame: React.Dispatch<React.SetStateAction<ServerFrame>>;
   setLocalId: React.Dispatch<React.SetStateAction<string | null>>;
   setLocked: React.Dispatch<React.SetStateAction<boolean>>;
+  setCanLock: React.Dispatch<React.SetStateAction<boolean>>;
   setWsStatus: React.Dispatch<React.SetStateAction<WsStatus>>;
   setWs: React.Dispatch<React.SetStateAction<WebSocket | null>>;
+  setSessionId: React.Dispatch<React.SetStateAction<string>>;
   sensitivity: number;
 }) => {
   const wsRef      = useRef<WebSocket | null>(null);
@@ -361,7 +414,8 @@ const NetworkController = ({
       setWsStatus("connecting");
 
       const s = typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("session") ?? "default") : "default";
-      const ws = new WebSocket(`ws://localhost:8080?session=${s}`);
+      const mode = typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("mode") ?? "real") : "real";
+      const ws = new WebSocket(`ws://localhost:8080?session=${s}&mode=${mode}`);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
       setWs(ws);
@@ -387,13 +441,18 @@ const NetworkController = ({
         retryTimer.current = setTimeout(connect.current, delay);
       };
 
-      ws.onmessage = event => {
+        ws.onmessage = event => {
         if (!(event.data instanceof ArrayBuffer)) return;
         try {
           const p = unpack(new Uint8Array(event.data));
           if (p?.type === "INIT") {
             localIdRef.current = p.id as string;
             setLocalId(p.id as string);
+            if (p.session && typeof window !== "undefined") {
+              setSessionId(p.session as string);
+              // Update URL seamlessly for sharing without reloading
+              window.history.replaceState({}, '', `/?session=${p.session}&mode=${new URLSearchParams(window.location.search).get("mode") ?? "real"}`);
+            }
           } else if (p?.players) {
             frameRef.current = p as ServerFrame;
             setFrame(p as ServerFrame);
@@ -463,7 +522,11 @@ const NetworkController = ({
   return (
     <PointerLockControls
       onLock={() => setLocked(true)}
-      onUnlock={() => setLocked(false)}
+      onUnlock={() => {
+        setLocked(false);
+        setCanLock(false);
+        setTimeout(() => setCanLock(true), 1500); // Browser security cooldown
+      }}
       pointerSpeed={sensitivity}
     />
   );
@@ -471,49 +534,32 @@ const NetworkController = ({
 
 // ─── Arena static geometry ────────────────────────────────────────────────────
 
-const ArenaGeometry = () => (
-  <>
-    {/* Ground */}
-    <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-      <planeGeometry args={[300, 300]} />
-      <meshStandardMaterial color="#3f3f46" roughness={0.95} />
-    </mesh>
-    {/* Grid */}
-    <gridHelper args={[120, 60, "#4b5563", "#27272a"]} position={[0, 0.015, 0]} />
+const ArenaGeometry = () => {
+  const { scene } = useGLTF("/assets/map.glb");
 
-    {/* Perimeter walls */}
-    {([
-      { p: [0, 2, 30]  as [number,number,number], r: [0,0,0]          as [number,number,number], w: 60, h: 4 },
-      { p: [0, 2, -30] as [number,number,number], r: [0,0,0]          as [number,number,number], w: 60, h: 4 },
-      { p: [30,2,  0]  as [number,number,number], r: [0,Math.PI/2, 0] as [number,number,number], w: 60, h: 4 },
-      { p: [-30,2, 0]  as [number,number,number], r: [0,Math.PI/2, 0] as [number,number,number], w: 60, h: 4 },
-    ]).map((w, i) => (
-      <mesh key={i} position={w.p} rotation={w.r} receiveShadow castShadow>
-        <boxGeometry args={[w.w, w.h, 0.5]} />
-        <meshStandardMaterial color="#1e293b" roughness={0.8} />
-      </mesh>
-    ))}
+  useEffect(() => {
+    scene.traverse((child: any) => {
+      if (child.isMesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+        if (child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach((m: any) => {
+              m.roughness = Math.max(m.roughness || 0, 0.65);
+            });
+          } else {
+            child.material.roughness = Math.max(child.material.roughness || 0, 0.65);
+          }
+        }
+      }
+    });
+  }, [scene]);
 
-    {/* Cover crates */}
-    {([
-      [-9, -9], [9, 9], [0, 16], [-16, 0], [16, -6],
-      [6, -19], [-11, 13], [13, -16], [-20, 20], [20, -20],
-    ] as [number,number][]).map(([x, z], i) => (
-      <mesh key={i} position={[x, 1, z]} castShadow receiveShadow>
-        <boxGeometry args={[2.5, 2, 2.5]} />
-        <meshStandardMaterial color="#ea580c" roughness={0.7} metalness={0.2} />
-      </mesh>
-    ))}
+  return <primitive object={scene} scale={[8, 8, 8]} position={[0, 0, 0]} />;
+};
 
-    {/* Taller cover pillars */}
-    {([ [0, 8], [-8, 0], [8, 0] ] as [number,number][]).map(([x, z], i) => (
-      <mesh key={`pillar-${i}`} position={[x, 2, z]} castShadow receiveShadow>
-        <boxGeometry args={[1.2, 4, 1.2]} />
-        <meshStandardMaterial color="#9a3412" roughness={0.6} metalness={0.3} />
-      </mesh>
-    ))}
-  </>
-);
+// Preload the GLB model to speed up rendering
+useGLTF.preload("/assets/map.glb");
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
@@ -521,6 +567,7 @@ export default function GameCanvas() {
   const [frame,     setFrame]     = useState<ServerFrame>({ players: [], shots: [] });
   const [localId,   setLocalId]   = useState<string | null>(null);
   const [locked,    setLocked]    = useState(false);
+  const [canLock,   setCanLock]   = useState(true);
   const [wsStatus,  setWsStatus]  = useState<WsStatus>("connecting");
   const [ws,        setWs]        = useState<WebSocket | null>(null);
 
@@ -550,8 +597,19 @@ export default function GameCanvas() {
       };
 
       window.addEventListener("unhandledrejection", handleRejection);
+
+      // Handle synchronous security errors thrown by the browser
+      const handleError = (event: ErrorEvent) => {
+        if (event.message && (event.message.includes("Pointer lock") || event.message.includes("PointerLockControls"))) {
+          event.preventDefault();
+          console.warn("[Sars] Suppressed synchronous pointer lock error.");
+        }
+      };
+      window.addEventListener("error", handleError);
+
       return () => {
         window.removeEventListener("unhandledrejection", handleRejection);
+        window.removeEventListener("error", handleError);
       };
     }
   }, []);
@@ -560,13 +618,13 @@ export default function GameCanvas() {
   const botCount   = frame.players.filter(p => p.isBot).length;
   const humanCount = frame.players.filter(p => !p.isBot).length;
 
-  const gameMode = frame.gameMode ?? "ffa";
+  const gameMode = frame.gameMode ?? "real";
   const teamScores = frame.teamScores ?? { red: 0, blue: 0 };
 
-  const changeMode = (mode: "ffa" | "tdm") => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(pack({ type: "CHANGE_MODE", mode }));
-    }
+  const selectMode = (mode: string) => {
+    // Navigate to reload page with the new mode cleanly
+    const newSession = Math.random().toString(36).slice(2, 8);
+    window.location.href = `/?mode=${mode}&session=${mode}_${newSession}`;
   };
 
   // Stance label
@@ -849,6 +907,11 @@ export default function GameCanvas() {
         </div>
       )}
 
+      {/* ── Cooldown Click Blocker ─────────────────────────────────────────── */}
+      {!canLock && (
+        <div className="absolute inset-0 z-50 pointer-events-auto cursor-wait" />
+      )}
+
       {/* ── Click-to-play splash ──────────────────────────────────────────── */}
       {!locked && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-gradient-to-b from-black/85 to-black/65 backdrop-blur-sm pointer-events-none select-none">
@@ -856,52 +919,41 @@ export default function GameCanvas() {
             <div className="text-white text-6xl font-black tracking-[0.5em] mb-1 drop-shadow-2xl">SARS</div>
             <div className="text-zinc-500 text-xs font-bold tracking-[0.4em] mb-4">MULTIPLAYER FPS</div>
             
-            {/* Game Mode Selector */}
-            <div className="mb-8 flex gap-3 justify-center pointer-events-auto">
+            {/* Giant PLAY Button */}
+            <div className="mb-6 flex justify-center pointer-events-auto">
               <button
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  changeMode("ffa");
+                  selectMode("real"); // The server's new auto-matchmaking will handle the rest!
                 }}
-                className={`px-4 py-2 rounded-xl text-[10px] font-black tracking-wider transition-all duration-200 border cursor-pointer ${
-                  gameMode === "ffa"
-                    ? "bg-blue-600 text-white border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.3)]"
-                    : "bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:bg-zinc-800"
-                }`}
+                className={`group relative inline-flex items-center justify-center gap-3 px-16 py-6 bg-blue-600 rounded-2xl border-b-[6px] border-blue-800 text-white font-black text-3xl tracking-[0.2em] shadow-[0_0_50px_rgba(37,99,235,0.4)] transition-all duration-150 active:translate-y-1.5 active:border-b-0 cursor-pointer ${canLock ? "hover:bg-blue-500 hover:shadow-[0_0_80px_rgba(59,130,246,0.6)]" : "opacity-50"}`}
               >
-                FREE FOR ALL (8 Players)
-              </button>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  changeMode("tdm");
-                }}
-                className={`px-4 py-2 rounded-xl text-[10px] font-black tracking-wider transition-all duration-200 border cursor-pointer ${
-                  gameMode === "tdm"
-                    ? "bg-blue-600 text-white border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.3)]"
-                    : "bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:bg-zinc-800"
-                }`}
-              >
-                TEAM DEATHMATCH (4 VS 4)
+                {canLock ? "CLICK TO PLAY" : "PLEASE WAIT..."}
               </button>
             </div>
 
-            <div className="inline-flex items-center gap-2 px-8 py-3.5 bg-blue-600/90 rounded-full border border-blue-400/40 text-white font-black text-sm tracking-widest animate-pulse shadow-[0_0_40px_rgba(59,130,246,0.4)]">
-              CLICK TO PLAY
-            </div>
-            <div className="mt-6 flex justify-center pointer-events-auto">
+            {/* Sub options */}
+            <div className="flex gap-4 justify-center pointer-events-auto">
               <button
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  const newSession = Math.random().toString(36).slice(2, 8);
-                  window.location.href = `/?session=${newSession}`;
+                  selectMode("practice");
                 }}
-                className="px-6 py-2 bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700 text-xs font-black tracking-widest rounded-xl transition-all duration-200 cursor-pointer"
+                className="px-6 py-3 bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600 hover:bg-zinc-800 text-[11px] font-black tracking-widest rounded-xl transition-all cursor-pointer"
               >
-                PLAY ON NEW SESSION
+                PRACTICE BOTS
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  selectMode("explore");
+                }}
+                className="px-6 py-3 bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600 hover:bg-zinc-800 text-[11px] font-black tracking-widest rounded-xl transition-all cursor-pointer"
+              >
+                EXPLORE MAP
               </button>
             </div>
           </div>
@@ -924,15 +976,17 @@ export default function GameCanvas() {
         />
         <hemisphereLight args={["#87ceeb", "#0f172a", 0.25]} />
 
-        <ArenaGeometry />
+        <React.Suspense fallback={null}>
+          <ArenaGeometry />
+        </React.Suspense>
         <TracesLayer shots={frame.shots} />
-        <NetworkController setFrame={setFrame} setLocalId={setLocalId} setLocked={setLocked} setWsStatus={setWsStatus} setWs={setWs} sensitivity={sensitivity} />
+        <NetworkController setFrame={setFrame} setLocalId={setLocalId} setLocked={setLocked} setCanLock={setCanLock} setWsStatus={setWsStatus} setWs={setWs} setSessionId={setSessionId} sensitivity={sensitivity} />
         <CameraRig myPlayer={myPlayer} locked={locked} />
 
         {/* Enemies — every player except local */}
         {frame.players
           .filter(p => p.id !== localId)
-          .map(p => <EnemyPlayer key={p.id} player={p} gameMode={gameMode} myTeam={myPlayer?.team} />)
+          .map(p => <MinecraftPlayer key={p.id} player={p} gameMode={gameMode} myTeam={myPlayer?.team} />)
         }
       </Canvas>
     </div>

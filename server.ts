@@ -1,23 +1,38 @@
 import type { ServerWebSocket } from "bun";
 import { pack, unpack } from "msgpackr";
-import { SarsMatchManager } from "./server/game-state";
+import { SarsMatchManager, GameMode } from "./server/game-state";
 import type { InputData } from "./server/game-state";
+import { initPhysicsEngine, stepGlobalPhysics } from "./server/engine";
 
 // ─── Concurrent Sessions Map ──────────────────────────────────────────────────
 
 const matches = new Map<string, SarsMatchManager>();
 
-function getOrCreateMatch(sessionId: string): SarsMatchManager {
+function getOrCreateMatch(sessionId: string, mode: GameMode = "real"): SarsMatchManager {
   let match = matches.get(sessionId);
   if (!match) {
-    match = new SarsMatchManager();
+    match = new SarsMatchManager(sessionId, mode);
     match.onShot = (ox, oz, dx, dz) => {
       match!.pendingShots.push([ox, oz, dx, dz]);
     };
     matches.set(sessionId, match);
-    console.log(`[Sars][${sessionId}] Initialized session.`);
+    console.log(`[Sars][${sessionId}] Created new room (Mode: ${mode}).`);
   }
   return match;
+}
+
+// Seamless Matchmaking logic
+function findOpenRealSession(): string {
+  for (const [sessionId, match] of matches.entries()) {
+    if (match.gameMode === "real") {
+      const humanCount = Array.from(match.players.values()).filter(p => !p.isBot).length;
+      if (humanCount < match.maxLobbySize) {
+        return sessionId;
+      }
+    }
+  }
+  // No open session found, generate a new one
+  return `real_${crypto.randomUUID()}`;
 }
 
 // ─── Per-connection data ──────────────────────────────────────────────────────
@@ -25,124 +40,143 @@ function getOrCreateMatch(sessionId: string): SarsMatchManager {
 interface WsData {
   id: string;
   session: string;
+  mode: GameMode;
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 
-const server = Bun.serve<WsData>({
-  port: Number(process.env.PORT ?? 8080),
+async function startServer() {
+  console.log("[Sars] Initializing Rapier3D Global Physics World...");
+  await initPhysicsEngine();
 
-  fetch(req, server) {
-    const url = new URL(req.url);
-    const session = url.searchParams.get("session") ?? "default";
-    const upgraded = server.upgrade(req, {
-      data: { id: crypto.randomUUID(), session },
-    });
-    if (upgraded) return undefined;
-    return new Response("Sars Game Server — connect via WebSocket", { status: 200 });
-  },
+  const server = Bun.serve<WsData>({
+    port: Number(process.env.PORT ?? 8080),
 
-  websocket: {
-    open(ws: ServerWebSocket<WsData>) {
-      const sessionId = ws.data.session;
-      const match = getOrCreateMatch(sessionId);
+    fetch(req, server) {
+      const url = new URL(req.url);
+      const mode = (url.searchParams.get("mode") as GameMode) || "real";
       
-      const humanCount = Array.from(match.players.values()).filter(p => !p.isBot).length;
-      if (humanCount >= 8) {
-        ws.send(pack({ type: "ERROR", reason: "Lobby is full (max 8 players)" }));
-        ws.close();
-        return;
+      let session = "";
+      if (mode === "practice" || mode === "explore") {
+        // Private rooms always get unique IDs
+        session = `${mode}_${crypto.randomUUID()}`;
+      } else {
+        // Real mode: find an open session or use the provided one
+        const reqSession = url.searchParams.get("session");
+        if (reqSession && reqSession !== "default") {
+          session = reqSession;
+        } else {
+          session = findOpenRealSession();
+        }
       }
-      ws.subscribe(`sars-match:${sessionId}`);
-      match.addPlayer(ws.data.id);
-      ws.send(pack({ type: "INIT", id: ws.data.id }));
-      console.log(`[Sars][${sessionId}] Player connected: ${ws.data.id}`);
+
+      const upgraded = server.upgrade(req, {
+        data: { id: crypto.randomUUID(), session, mode },
+      });
+      if (upgraded) return undefined;
+      return new Response("Sars Game Server — connect via WebSocket", { status: 200 });
     },
 
-    message(ws: ServerWebSocket<WsData>, message: string | ArrayBuffer | Uint8Array) {
-      let buf: Uint8Array;
-      if (message instanceof Uint8Array) {
-        buf = message;
-      } else if (message instanceof ArrayBuffer) {
-        buf = new Uint8Array(message);
-      } else {
-        return; // ignore plain-text frames
-      }
-
-      const sessionId = ws.data.session;
-      const match = getOrCreateMatch(sessionId);
-
-      try {
-        const msg = unpack(buf);
-        if (msg && msg.type === "CHANGE_MODE") {
-          match.setGameMode(msg.mode);
+    websocket: {
+      open(ws: ServerWebSocket<WsData>) {
+        const sessionId = ws.data.session;
+        const match = getOrCreateMatch(sessionId, ws.data.mode);
+        
+        const humanCount = Array.from(match.players.values()).filter(p => !p.isBot).length;
+        if (humanCount >= match.maxLobbySize) {
+          ws.send(pack({ type: "ERROR", reason: "Lobby is full (max 8 players)" }));
+          ws.close();
           return;
         }
-        if (msg && msg.type === "SET_BOT_DIFFICULTY") {
-          match.setBotDifficulty(msg.difficulty);
+        ws.subscribe(`sars-match:${sessionId}`);
+        match.addPlayer(ws.data.id);
+        ws.send(pack({ type: "INIT", id: ws.data.id, session: sessionId }));
+        console.log(`[Sars][${sessionId}] Player connected: ${ws.data.id}`);
+      },
+
+      message(ws: ServerWebSocket<WsData>, message: string | ArrayBuffer | Uint8Array) {
+        let buf: Uint8Array;
+        if (message instanceof Uint8Array) {
+          buf = message;
+        } else if (message instanceof ArrayBuffer) {
+          buf = new Uint8Array(message);
+        } else {
           return;
         }
 
-        const input = msg as InputData;
+        const sessionId = ws.data.session;
+        const match = matches.get(sessionId);
+        if (!match) return;
 
-        // Record human shot trace
-        if (input.shoot) {
-          const shooter = match.players.get(ws.data.id);
-          if (shooter && shooter.reloadTicks === 0 && shooter.shootCooldownTicks === 0 && shooter.ammo > 0) {
-            const dirX = -Math.sin(shooter.rotY);
-            const dirZ = -Math.cos(shooter.rotY);
-            match.pendingShots.push([
-              shooter.position.x,
-              shooter.position.z,
-              dirX,
-              dirZ,
-            ]);
+        try {
+          const msg = unpack(buf);
+          const input = msg as InputData;
+
+          if (input.shoot) {
+            const shooter = match.players.get(ws.data.id);
+            if (shooter && shooter.reloadTicks === 0 && shooter.shootCooldownTicks === 0 && shooter.ammo > 0) {
+              const dirX = -Math.sin(shooter.rotY);
+              const dirZ = -Math.cos(shooter.rotY);
+              match.pendingShots.push([
+                shooter.position.x,
+                shooter.position.z,
+                dirX,
+                dirZ,
+              ]);
+            }
+          }
+
+          match.processInput(ws.data.id, input);
+        } catch (e) {
+          console.error(`[Sars][${sessionId}] Bad message from ${ws.data.id}:`, e);
+        }
+      },
+
+      close(ws: ServerWebSocket<WsData>) {
+        const sessionId = ws.data.session;
+        const match = matches.get(sessionId);
+        if (match) {
+          match.removePlayer(ws.data.id);
+          const humanCount = Array.from(match.players.values()).filter(p => !p.isBot).length;
+          if (humanCount === 0) {
+            matches.delete(sessionId);
+            console.log(`[Sars][${sessionId}] Disposed empty session.`);
           }
         }
-
-        match.processInput(ws.data.id, input);
-      } catch (e) {
-        console.error(`[Sars][${sessionId}] Bad message from ${ws.data.id}:`, e);
-      }
+        ws.unsubscribe(`sars-match:${sessionId}`);
+        console.log(`[Sars][${sessionId}] Player disconnected: ${ws.data.id}`);
+      },
     },
+  });
 
-    close(ws: ServerWebSocket<WsData>) {
-      const sessionId = ws.data.session;
-      const match = matches.get(sessionId);
-      if (match) {
-        match.removePlayer(ws.data.id);
-        // Garbage collect empty session matches to keep memory footprint low
-        const humanCount = Array.from(match.players.values()).filter(p => !p.isBot).length;
-        if (humanCount === 0) {
-          matches.delete(sessionId);
-          console.log(`[Sars][${sessionId}] Disposed empty session.`);
-        }
-      }
-      ws.unsubscribe(`sars-match:${sessionId}`);
-      console.log(`[Sars][${sessionId}] Player disconnected: ${ws.data.id}`);
-    },
-  },
-});
+  // ─── 30 Hz game loop ─────────────────────────────────────────────────────────
 
-// ─── 30 Hz game loop ─────────────────────────────────────────────────────────
+  setInterval(() => {
+    // 1. Tick logic & inputs for all matches
+    for (const match of matches.values()) {
+      match.tickReloads();
+      match.tickBots();
+    }
 
-setInterval(() => {
-  for (const [sessionId, match] of matches.entries()) {
-    // Tick game components for this match
-    match.tickReloads();
-    match.tickBots();
-    match.tickPhysics(); // Authoritative vertical physics
+    // 2. Step the Global Physics World ONCE per tick (Massive RAM optimization)
+    stepGlobalPhysics();
 
-    const state = Array.from(match.players.values());
-    const shots = match.pendingShots.splice(0); // drain and reset
+    // 3. Resolve kinematic movements & broadcast state
+    for (const [sessionId, match] of matches.entries()) {
+      match.tickPhysics();
+      const state = Array.from(match.players.values());
+      const shots = match.pendingShots.splice(0);
 
-    server.publish(`sars-match:${sessionId}`, pack({
-      players: state,
-      shots,
-      gameMode: match.gameMode,
-      teamScores: match.teamScores
-    }));
-  }
-}, 1000 / 30);
+      server.publish(`sars-match:${sessionId}`, pack({
+        players: state,
+        shots,
+        gameMode: match.gameMode,
+        teamScores: match.teamScores
+      }));
+    }
+  }, 1000 / 30);
 
-console.log(`[Sars] Server running on ws://localhost:${server.port}`);
+  console.log(`[Sars] Server running on ws://localhost:${server.port}`);
+}
+
+startServer().catch(console.error);

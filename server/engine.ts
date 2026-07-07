@@ -1,187 +1,198 @@
+import RAPIER from "@dimforge/rapier3d-compat";
+import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { readFileSync, existsSync } from "fs";
+
 export interface Vector3 {
     x: number;
     y: number;
     z: number;
 }
 
-export interface BoundingBox {
-    minX: number;
-    maxX: number;
-    minY: number;
-    maxY: number;
-    minZ: number;
-    maxZ: number;
+let preloadedVertices: Float32Array = new Float32Array(0);
+let preloadedIndices: Uint32Array = new Uint32Array(0);
+
+export let globalWorld: RAPIER.World;
+export let mapCollider: RAPIER.Collider;
+
+const colliderRooms = new Map<number, string>(); // Maps a collider handle to a session/room ID
+
+export async function initPhysicsEngine() {
+    await RAPIER.init();
+
+    // Extreme Krunker-style gravity (-55 m/s^2) for fast, snappy jumps
+    globalWorld = new RAPIER.World({ x: 0, y: -55.0, z: 0 });
+
+    const glbPath = "assets/industry.glb";
+    const scale = 8.0;
+
+    if (!existsSync(glbPath)) {
+        console.warn(`[SarsPhysicsEngine] GLB file not found at ${glbPath}.`);
+        return;
+    }
+
+    try {
+        const buffer = readFileSync(glbPath);
+        const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+        const loader = new GLTFLoader();
+
+        const gltf: any = await new Promise((resolve, reject) => {
+            loader.parse(arrayBuffer, '', resolve, reject);
+        });
+
+        const positions: number[] = [];
+        const indices: number[] = [];
+        let indexOffset = 0;
+
+        gltf.scene.updateMatrixWorld(true);
+
+        gltf.scene.traverse((node: any) => {
+            if (node.isMesh) {
+                const mesh = node as THREE.Mesh;
+                const geometry = mesh.geometry;
+                
+                if (!geometry.attributes.position) return;
+
+                const posAttribute = geometry.attributes.position;
+                const indexAttribute = geometry.index;
+
+                const localPositions = new Float32Array(posAttribute.array.length);
+                for (let i = 0; i < posAttribute.count; i++) {
+                    const vec = new THREE.Vector3();
+                    vec.fromBufferAttribute(posAttribute, i);
+                    vec.applyMatrix4(mesh.matrixWorld);
+                    vec.multiplyScalar(scale);
+                    
+                    localPositions[i * 3] = vec.x;
+                    localPositions[i * 3 + 1] = vec.y;
+                    localPositions[i * 3 + 2] = vec.z;
+                }
+
+                for (let i = 0; i < localPositions.length; i++) positions.push(localPositions[i]);
+
+                if (indexAttribute) {
+                    for (let i = 0; i < indexAttribute.count; i++) {
+                        indices.push(indexAttribute.getX(i) + indexOffset);
+                    }
+                } else {
+                    for (let i = 0; i < posAttribute.count; i++) indices.push(i + indexOffset);
+                }
+                indexOffset += posAttribute.count;
+            }
+        });
+
+        preloadedVertices = new Float32Array(positions);
+        preloadedIndices = new Uint32Array(indices);
+        
+        const colliderDesc = RAPIER.ColliderDesc.trimesh(preloadedVertices, preloadedIndices);
+        mapCollider = globalWorld.createCollider(colliderDesc);
+
+        console.log(`[SarsPhysicsEngine] Global map Trimesh generated with ${preloadedVertices.length / 3} vertices.`);
+    } catch (err) {
+        console.error("[SarsPhysicsEngine] Failed to parse GLB file for physics:", err);
+    }
 }
 
-export const CRATES: [number, number][] = [
-    [-9, -9], [9, 9], [0, 16], [-16, 0], [16, -6],
-    [6, -19], [-11, 13], [13, -16], [-20, 20], [20, -20],
-];
+export function stepGlobalPhysics() {
+    if (globalWorld) globalWorld.step();
+}
 
-export const PILLARS: [number, number][] = [
-    [0, 8], [-8, 0], [8, 0]
-];
+export class RoomPhysics {
+    public roomId: string;
+    public characterControllers: Map<string, RAPIER.KinematicCharacterController> = new Map();
+    public playerBodies: Map<string, RAPIER.RigidBody> = new Map();
+    public playerColliders: Map<string, RAPIER.Collider> = new Map();
 
-export const OBSTACLES: BoundingBox[] = [
-    ...CRATES.map(([x, z]) => ({
-        minX: x - 1.25,
-        maxX: x + 1.25,
-        minY: 0,
-        maxY: 2,
-        minZ: z - 1.25,
-        maxZ: z + 1.25,
-    })),
-    ...PILLARS.map(([x, z]) => ({
-        minX: x - 0.6,
-        maxX: x + 0.6,
-        minY: 0,
-        maxY: 4,
-        minZ: z - 0.6,
-        maxZ: z + 0.6,
-    })),
-];
-
-export class SarsPhysicsEngine {
-    public static readonly PLAYER_RADIUS = 0.8;
-    public static readonly PLAYER_HEIGHT = 2.0;
-
-    /**
-     * Checks for collision between two players represented by cylindrical bounding boxes.
-     * @param pos1 Position of the first player (base of the cylinder)
-     * @param pos2 Position of the second player (base of the cylinder)
-     * @returns True if the cylinders overlap, false otherwise
-     */
-    public static checkPlayerCollision(pos1: Vector3, pos2: Vector3): boolean {
-        // Check Y axis overlap (height)
-        const yOverlap = pos1.y < pos2.y + this.PLAYER_HEIGHT && pos1.y + this.PLAYER_HEIGHT > pos2.y;
-        if (!yOverlap) {
-            return false;
-        }
-
-        // Check XZ plane overlap (radius)
-        const dx = pos1.x - pos2.x;
-        const dz = pos1.z - pos2.z;
-        const distanceSq = dx * dx + dz * dz;
-        const minDistanceSq = (this.PLAYER_RADIUS * 2) * (this.PLAYER_RADIUS * 2);
-
-        return distanceSq < minDistanceSq;
+    constructor(roomId: string) {
+        this.roomId = roomId;
     }
 
-    /**
-     * Checks if a player cylinder at a target position intersects any scene obstacle.
-     * @param pos Candidate base position of the player
-     * @param customHeight Height of the player depending on stance
-     * @returns True if colliding with any obstacle, false otherwise
-     */
-    public static checkObstacleCollision(pos: Vector3, customHeight?: number): boolean {
-        const height = customHeight ?? this.PLAYER_HEIGHT;
-        const pMinX = pos.x - this.PLAYER_RADIUS;
-        const pMaxX = pos.x + this.PLAYER_RADIUS;
-        const pMinY = pos.y;
-        const pMaxY = pos.y + height;
-        const pMinZ = pos.z - this.PLAYER_RADIUS;
-        const pMaxZ = pos.z + this.PLAYER_RADIUS;
+    public addPlayer(id: string, startPos: Vector3): void {
+        const bodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(startPos.x, startPos.y, startPos.z);
+        const body = globalWorld.createRigidBody(bodyDesc);
 
-        for (const obs of OBSTACLES) {
-            const overlap = (
-                pMinX < obs.maxX && pMaxX > obs.minX &&
-                pMinY < obs.maxY && pMaxY > obs.minY &&
-                pMinZ < obs.maxZ && pMaxZ > obs.minZ
-            );
-            if (overlap) {
-                return true;
-            }
-        }
-        return false;
+        const colliderDesc = RAPIER.ColliderDesc.capsule(0.6, 0.4); 
+        const collider = globalWorld.createCollider(colliderDesc, body);
+
+        colliderRooms.set(collider.handle, this.roomId);
+
+        // Krunker style movement uses slightly more offset to prevent sticking to micro-bumps
+        const characterController = globalWorld.createCharacterController(0.1); 
+        characterController.enableAutostep(0.5, 0.2, true);
+        characterController.enableSnapToGround(0.3);
+
+        this.playerBodies.set(id, body);
+        this.playerColliders.set(id, collider);
+        this.characterControllers.set(id, characterController);
     }
 
-    /**
-     * Checks if a 2D hitscan ray (on the XZ plane) intersects a target's cylindrical bounding box.
-     * @param origin Origin of the hitscan ray
-     * @param rotY Y-rotation angle in radians (yaw)
-     * @param target Base position of the target cylinder
-     * @returns True if the ray intersects the target, false otherwise
-     */
-    public static checkHitscan(origin: Vector3, rotY: number, target: Vector3): boolean {
-        // Check Y-axis bounds (hitscan must be within target's height)
-        if (origin.y < target.y || origin.y > target.y + this.PLAYER_HEIGHT) {
-            return false;
-        }
+    public removePlayer(id: string): void {
+        const body = this.playerBodies.get(id);
+        const collider = this.playerColliders.get(id);
+        
+        if (collider) colliderRooms.delete(collider.handle);
+        if (body) globalWorld.removeRigidBody(body); // Automatically removes the attached collider
 
-        // Direction vector of the ray on the XZ plane
-        const dirX = -Math.sin(rotY);
-        const dirZ = -Math.cos(rotY);
-
-        // Vector from origin to target center
-        const dx = target.x - origin.x;
-        const dz = target.z - origin.z;
-
-        // Check if the target is behind the origin
-        const dot = dx * dirX + dz * dirZ;
-        if (dot < 0) {
-            return false;
-        }
-
-        // Calculate perpendicular distance from the target to the ray
-        const perpDistance = Math.abs(dx * dirZ - dz * dirX);
-
-        return perpDistance <= this.PLAYER_RADIUS;
+        this.playerBodies.delete(id);
+        this.playerColliders.delete(id);
+        this.characterControllers.delete(id);
     }
 
-    /**
-     * Checks if a 2D horizontal ray intersects an obstacle closer than the target.
-     * @param origin Starting point of the bullet ray
-     * @param rotY Y-rotation (yaw) of the shooter
-     * @param targetDist Distance from the shooter to the target player
-     * @returns True if blocked by an obstacle, false otherwise
-     */
-    public static checkBulletObstacleCollision(origin: Vector3, rotY: number, targetDist: number): boolean {
-        // Direction vector of the ray on the XZ plane
-        const dirX = -Math.sin(rotY);
-        const dirZ = -Math.cos(rotY);
+    public movePlayer(id: string, desiredMovement: Vector3): { pos: Vector3; grounded: boolean } | null {
+        const controller = this.characterControllers.get(id);
+        const body = this.playerBodies.get(id);
+        const collider = this.playerColliders.get(id);
 
-        for (const obs of OBSTACLES) {
-            // Check Y bounds overlap
-            if (origin.y < obs.minY || origin.y > obs.maxY) {
-                continue;
+        if (!controller || !body || !collider) return null;
+
+        controller.computeColliderMovement(
+            collider,
+            { x: desiredMovement.x, y: desiredMovement.y, z: desiredMovement.z },
+            undefined, undefined, undefined, undefined,
+            (c: RAPIER.Collider) => {
+                // Only collide with the global map OR players in the EXACT SAME room
+                return c.handle === mapCollider.handle || colliderRooms.get(c.handle) === this.roomId;
             }
+        );
 
-            // Ray-Box 2D intersection on XZ plane using slabs method
-            let tmin = -Infinity;
-            let tmax = Infinity;
+        const movement = controller.computedMovement();
+        const pos = body.translation();
 
-            // X-slab
-            if (Math.abs(dirX) < 1e-6) {
-                if (origin.x < obs.minX || origin.x > obs.maxX) {
-                    continue;
-                }
-            } else {
-                const tx1 = (obs.minX - origin.x) / dirX;
-                const tx2 = (obs.maxX - origin.x) / dirX;
-                tmin = Math.max(tmin, Math.min(tx1, tx2));
-                tmax = Math.min(tmax, Math.max(tx1, tx2));
-            }
+        const newPos = { x: pos.x + movement.x, y: pos.y + movement.y, z: pos.z + movement.z };
+        body.setNextKinematicTranslation(newPos);
 
-            // Z-slab
-            if (Math.abs(dirZ) < 1e-6) {
-                if (origin.z < obs.minZ || origin.z > obs.maxZ) {
-                    continue;
-                }
-            } else {
-                const tz1 = (obs.minZ - origin.z) / dirZ;
-                const tz2 = (obs.maxZ - origin.z) / dirZ;
-                tmin = Math.max(tmin, Math.min(tz1, tz2));
-                tmax = Math.min(tmax, Math.max(tz1, tz2));
-            }
+        return { pos: newPos, grounded: controller.computedGrounded() };
+    }
 
-            if (tmax >= tmin && tmax >= 0) {
-                const hitDist = tmin < 0 ? 0 : tmin;
-                if (hitDist < targetDist) {
-                    return true; // Obstacle blocks the bullet path before target is reached
+    public teleportPlayer(id: string, pos: Vector3): void {
+        const body = this.playerBodies.get(id);
+        if (body) {
+            body.setTranslation(pos, true);
+        }
+    }
+
+    public checkHitscan(origin: Vector3, dir: Vector3, maxDistance: number): string | null {
+        const ray = new RAPIER.Ray(
+            { x: origin.x, y: origin.y, z: origin.z },
+            { x: dir.x, y: dir.y, z: dir.z }
+        );
+
+        let closestHitId: string | null = null;
+        let closestDist = maxDistance;
+
+        // Using standard castRay with predicate to only hit map or same-room players
+        const hit = globalWorld.castRay(ray, maxDistance, true, RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC, undefined, undefined, undefined, (c: RAPIER.Collider) => {
+            return c.handle === mapCollider.handle || colliderRooms.get(c.handle) === this.roomId;
+        });
+        
+        if (hit && hit.collider) {
+            // Did we hit a player?
+            for (const [id, collider] of this.playerColliders.entries()) {
+                if (collider.handle === hit.collider.handle) {
+                    return id;
                 }
             }
         }
-
-        return false;
+        return null;
     }
 }
