@@ -815,11 +815,6 @@ export default function GameCanvas() {
             </div>
             <div className="mt-1 text-[10px] text-blue-400 font-bold tracking-[0.2em]">SCORE</div>
             <div className="text-white text-3xl font-black leading-none">{myPlayer?.score ?? 0}</div>
-            {gameMode === "tdm" && myPlayer?.team && (
-              <div className="mt-2 text-[10px] font-bold tracking-[0.2em] uppercase" style={{ color: myPlayer.team === "red" ? "#f87171" : "#60a5fa" }}>
-                TEAM {myPlayer.team}
-              </div>
-            )}
           </div>
 
           {/* Stance indicator — bottom centre */}
@@ -864,21 +859,6 @@ export default function GameCanvas() {
             </svg>
           </div>
 
-          {/* Team Score Overlay — top center */}
-          {gameMode === "tdm" && (
-            <div className="absolute top-6 left-1/2 -translate-x-1/2 flex gap-6 px-6 py-2.5 bg-black/60 border border-white/10 rounded-2xl backdrop-blur-md">
-              <div className="flex flex-col items-center">
-                <span className="text-[9px] text-red-400 font-bold tracking-[0.2em]">RED TEAM</span>
-                <span className="text-white text-xl font-black">{teamScores.red}</span>
-              </div>
-              <div className="w-[1px] bg-white/10 self-stretch" />
-              <div className="flex flex-col items-center">
-                <span className="text-[9px] text-blue-400 font-bold tracking-[0.2em]">BLUE TEAM</span>
-                <span className="text-white text-xl font-black">{teamScores.blue}</span>
-              </div>
-            </div>
-          )}
-
           {/* Scoreboard — top right */}
           <div className="absolute top-16 right-4 flex flex-col gap-1 w-48">
             <div className="text-[9px] text-zinc-500 font-bold tracking-[0.2em] mb-0.5 text-right">
@@ -886,19 +866,14 @@ export default function GameCanvas() {
             </div>
             {[...frame.players].sort((a,b) => b.score - a.score).map(p => {
               const isSelf = p.id === localId;
-              const rowClass = gameMode === "tdm"
-                ? (p.team === "red"
-                    ? `bg-red-950/40 ${isSelf ? "border-red-500 text-white font-black" : "border-red-900/40 text-red-200"}`
-                    : `bg-blue-950/40 ${isSelf ? "border-blue-500 text-white font-black" : "border-blue-900/40 text-blue-200"}`)
-                : (isSelf
-                    ? "bg-blue-600/40 border-blue-500/40 text-white"
-                    : "bg-black/40 border-white/5 text-zinc-400");
-              const namePrefix = gameMode === "tdm" ? (p.team === "red" ? "[R] " : "[B] ") : "";
+              const rowClass = isSelf
+                ? "bg-blue-600/40 border-blue-500/40 text-white"
+                : "bg-black/40 border-white/5 text-zinc-400";
               const botTag = p.isBot ? ` [${(p.difficulty ?? "easy").toUpperCase().slice(0, 4)}]` : "";
               return (
                 <div key={p.id} className={`flex items-center justify-between px-2 py-1 rounded text-[10px] font-mono border ${rowClass}`}>
                   <span className={p.isBot ? "text-purple-300" : "text-green-300"}>
-                    {p.isBot ? "🤖" : "🎮"} {namePrefix}{p.id.slice(0, 7)}{botTag}
+                    {p.isBot ? "🤖" : "🎮"} {p.id.slice(0, 7)}{botTag}
                   </span>
                   <span>{p.score}</span>
                 </div>
