@@ -310,9 +310,10 @@ export class SarsMatchManager {
       cand.x = Math.max(-29, Math.min(29, cand.x));
       cand.z = Math.max(-29, Math.min(29, cand.z));
 
+      const botHeight = (bot.isCrouching || bot.isSliding) ? 1.3 : 2.0;
       const blocked = [...this.players.values()].some(
         p => p.id !== bot.id && SarsPhysicsEngine.checkPlayerCollision(cand, p.position)
-      );
+      ) || SarsPhysicsEngine.checkObstacleCollision(cand, botHeight);
       if (!blocked) { bot.position.x = cand.x; bot.position.z = cand.z; }
     }
 
@@ -408,9 +409,10 @@ export class SarsMatchManager {
     if (Number.isNaN(cand.x) || !Number.isFinite(cand.x)) cand.x = player.position.x;
     if (Number.isNaN(cand.z) || !Number.isFinite(cand.z)) cand.z = player.position.z;
 
+    const playerHeight = (player.isCrouching || player.isSliding) ? 1.3 : 2.0;
     const blocked = [...this.players.entries()].some(
       ([id, p]) => id !== playerId && SarsPhysicsEngine.checkPlayerCollision(cand, p.position)
-    );
+    ) || SarsPhysicsEngine.checkObstacleCollision(cand, playerHeight);
     if (!blocked) { player.position.x = cand.x; player.position.z = cand.z; }
 
     // Reload input check
@@ -459,9 +461,16 @@ export class SarsMatchManager {
 
     if (!SarsPhysicsEngine.checkHitscan(shooter.position, rotY, target.position)) return;
 
+    // Check if there is an obstacle blocking the bullet path before it hits the target.
+    const targetDist = Math.hypot(target.position.x - shooter.position.x, target.position.z - shooter.position.z);
+    const bulletHeight = shooter.position.y + (shooter.isSliding ? 0.45 : shooter.isCrouching ? 0.75 : 1.55);
+    const rayOrigin = { x: shooter.position.x, y: bulletHeight, z: shooter.position.z };
+    if (SarsPhysicsEngine.checkBulletObstacleCollision(rayOrigin, rotY, targetDist)) {
+      return; // Bullet blocked by obstacle!
+    }
+
     // Segment damage: head = 80%, body = 40%, leg = 15%
     // Bullet height depends on shooter stance: Sliding (0.45), Crouching (0.75), Standing (1.55)
-    const bulletHeight = shooter.position.y + (shooter.isSliding ? 0.45 : shooter.isCrouching ? 0.75 : 1.55);
     const targetHeight = (target.isCrouching || target.isSliding) ? 1.3 : 2.0;
     const relativeHitY = bulletHeight - target.position.y;
 

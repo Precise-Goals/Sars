@@ -534,6 +534,25 @@ export default function GameCanvas() {
       const searchParams = new URLSearchParams(window.location.search);
       const s = searchParams.get("session") ?? "default";
       setSessionId(s);
+
+      // Handle and suppress browser-specific Pointer Lock security rejections
+      const handleRejection = (event: PromiseRejectionEvent) => {
+        const reason = event.reason;
+        if (
+          reason &&
+          (reason.name === "WrongDocumentError" ||
+            (reason.message && reason.message.includes("pointer lock")) ||
+            (reason.message && reason.message.includes("PointerLockControls")))
+        ) {
+          event.preventDefault(); // Suppress the unhandled rejection warning
+          console.warn("[Sars] Suppressed browser pointer lock security error:", reason.message || reason);
+        }
+      };
+
+      window.addEventListener("unhandledrejection", handleRejection);
+      return () => {
+        window.removeEventListener("unhandledrejection", handleRejection);
+      };
     }
   }, []);
 
