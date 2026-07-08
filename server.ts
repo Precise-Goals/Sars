@@ -12,9 +12,6 @@ function getOrCreateMatch(sessionId: string, mode: GameMode = "real"): SarsMatch
   let match = matches.get(sessionId);
   if (!match) {
     match = new SarsMatchManager(sessionId, mode);
-    match.onShot = (ox, oz, dx, dz) => {
-      match!.pendingShots.push([ox, oz, dx, dz]);
-    };
     matches.set(sessionId, match);
     console.log(`[Sars][${sessionId}] Created new room (Mode: ${mode}).`);
   }

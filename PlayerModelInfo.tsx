@@ -121,9 +121,9 @@ type GLTFResult = GLTF & {
   animations: GLTFAction[]
 }
 
-export function Model(props: JSX.IntrinsicElements['group']) {
-  const group = React.useRef<THREE.Group>()
-  const { nodes, materials, animations } = useGLTF('/player.glb') as GLTFResult
+export function Model(props: any) {
+  const group = React.useRef<THREE.Group>(null!)
+  const { nodes, materials, animations } = useGLTF('/player.glb') as unknown as GLTFResult
   const { actions } = useAnimations(animations, group)
   return (
     <group ref={group} {...props} dispose={null}>

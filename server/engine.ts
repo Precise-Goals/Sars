@@ -148,7 +148,7 @@ export class RoomPhysics {
         controller.computeColliderMovement(
             collider,
             { x: desiredMovement.x, y: desiredMovement.y, z: desiredMovement.z },
-            undefined, undefined, undefined, undefined,
+            undefined, undefined,
             (c: RAPIER.Collider) => {
                 // Only collide with the global map OR players in the EXACT SAME room
                 return c.handle === mapCollider.handle || colliderRooms.get(c.handle) === this.roomId;

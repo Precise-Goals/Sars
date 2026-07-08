@@ -611,7 +611,7 @@ useGLTF.preload("/assets/map.glb");
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function GameCanvas() {
-  const [inGame,    setInGame]    = useState(false);
+  const [inGame,    setInGame]    = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("join") === "true");
   const [frame,     setFrame]     = useState<ServerFrame>({ players: [], shots: [] });
   const [localId,   setLocalId]   = useState<string | null>(null);
   const [locked,    setLocked]    = useState(false);
@@ -685,7 +685,7 @@ export default function GameCanvas() {
   const selectMode = (mode: string) => {
     // Navigate to reload page with the new mode cleanly
     const newSession = Math.random().toString(36).slice(2, 8);
-    window.location.href = `/?mode=${mode}&session=${mode}_${newSession}`;
+    window.location.href = `/?mode=${mode}&session=${mode}_${newSession}&join=true`;
   };
 
   // Stance label
